@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: ankirspy
+Version: 2.1.26
+Summary: Anki's Rust library code Python bindings
+Author: Ankitects Pty Ltd and contributors <https://help.ankiweb.net>
+License: AGPL-3.0-or-later
+Description-Content-Type: text/markdown; charset=UTF-8; variant=GFM
+
+To build from scratch, please see https://github.com/ankitects/anki
+
