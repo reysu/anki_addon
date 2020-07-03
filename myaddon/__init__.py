@@ -1,6 +1,12 @@
-from aqt import gui_hooks
+from aqt import mw
+from aqt.utils import showInfo
+from aqt.qt import *
 
-def myfunc(card):
-    print("myfunc")
+def testFunction():
+    cardCount = mw.col.cardCount()
+    showInfo("Card count: %d" % cardCount)
 
-gui_hooks.reviewer_did_show_answer.append(myfunc)
+action = QAction("test",mw)
+action.triggered.connect(testFunction)
+mw.form.menuTools.addAction(action)
+
