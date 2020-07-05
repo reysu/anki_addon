@@ -1,11 +1,18 @@
 var field = document.querySelectorAll('.test');
 field[0].style.backgroundColor = "red";
-sentence = field.innerHTML;
+sentence = field[0].innerHTML;
 sentence = furiganify(sentence);
-field[0].innerHTML = sentence
+field[0].innerHTML = sentence;
 
 function furiganify(sentence) {
-       return "test";
+       var regex;
+	   var tempWord = "";
+       if(regex = sentence.match(/[^ ]+?\[[^\]]+\]*/g)){
+      	 for(var i=0; i<regex.length; i++){
+           	tempWord = regex[i];
+       		}
+       }
+       return tempWord;
 }
 
 /*
@@ -15,5 +22,6 @@ and convert it to
 僕の　<ruby>名前<rt>なまえ</rt></ruby>　はエリックです
 which will convert it into furgiana
 
-todo: use regex 
+todo: use regex
+
 */
