@@ -19,10 +19,11 @@ def addBlankModel(col):
     # recognition card
     t['qfmt'] = "<div class=jp> {{Expression}} </div>"
     t['afmt'] = """{{FrontSide}}\n\n<hr id=answer>\n\n\
-    <div class=jp> {{furigana:Reading}} </div><br>\n\
+    <div class=jp> {{Reading}} </div><br>\n\
     {{Meaning}}"""
     mm.addTemplate(m,t)
     mm.add(m)
     return m
 
 
+anki.stdmodels.models.appen((("Sentence Card"), addBlankModel()))
