@@ -1,18 +1,20 @@
 var field = document.querySelectorAll('.test');
-field[0].style.backgroundColor = "red";
+field[0].style.backgroundColor = "white";
 sentence = field[0].innerHTML;
 sentence = furiganify(sentence);
 field[0].innerHTML = sentence;
-
 function furiganify(sentence) {
        var regex;
-	   var tempWord = "";
-       if(regex = sentence.match(/[^ ]+?\[[^\]]+\]*/g)){
+       var tempWord = "";
+       if(regex = sentence.match(/[^ ]+?\{[^\]]+\}*/g)){
       	 for(var i=0; i<regex.length; i++){
-           	tempWord = regex[i];
-       		}
+           	furigana = regex[i].match(/\{([^\]]+)\}/)[1];
+		baseWord = regex[i].replace(/\{([^\]]+)\}/, "")
+		html = "<ruby>" + baseWord + "<rt>" + furigana + "</rt> </ruby>"
+		sentence = sentence.replace(/[^ ]+?\{[^\]]+\}*/g, html)
+		}
        }
-       return tempWord;
+       return sentence;
 }
 
 /*
