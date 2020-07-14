@@ -41,17 +41,22 @@ function furgianifyBrackets(sentence){
 }
 
 //there's like some bug with when you have something on a new Line
-//it makes the thing super high.. 
+//it makes the thing super high..
 function curlyBrackets(sentence){
   var regex;
   var tempWord = "";
   regex = sentence.match(/[^ ]+?\{[^\}]+\}*/g);
   if(regex){
     for(var i=0; i<regex.length; i++){
-      furigana = regex[i].match(/\{([^\}]+)\}/)[1];
-      baseWord = regex[i].replace(/\{([^\}]+)\}/, "")
+      full = regex[i].match(/[^>]+?\{[^\}]+\}/).toString();
+      furigana = full.match(/\{([^\}]+)\}/)[1];
+      baseWord = full.replace(/\{([^\}]+)\}/, "")
+
       html = "<ruby>" + baseWord + "<rt>" + furigana + "</rt> </ruby>";
-      sentence = sentence.split(regex[i]).join(html);
+    // html = "<ruby> hey<rt>你好</rt></ruby>"
+     sentence = sentence.split(full).join(html);
+   // sentence = typeof full
+
     }
   }
   return sentence;
