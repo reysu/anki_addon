@@ -5,12 +5,34 @@ from anki.stdmodels import models
 from anki.hooks import addHook
 from shutil import copyfile
 modelList = []
-name = 'Testing'
+name = 'Sentence Card'
 fields = ['Front',  'Back']
 
-front = '''<{{Front}}'''
+front = '''<{{Front}}<script>
+var field = document.querySelectorAll('.test');
+sentence = field[0].innerHTML;
+sentence = curlyBrackets(sentence);
+field[0].innerHTML = sentence;
+function curlyBrackets(sentence){
+  var regex;
+  var tempWord = "";
+  regex = sentence.match(/[^ ]+?\{[^\}]+\}*/g);
+  if(regex){
+    for(var i=0; i<regex.length; i++){
+      full = regex[i].match(/[^>]+?\{[^\}]+\}/).toString();
+      furigana = full.match(/\{([^\}]+)\}/)[1];
+      baseWord = full.replace(/\{([^\}]+)\}/, "")
+      html = "<ruby>" + baseWord + "<rt>" + furigana + "</rt> </ruby>";
+      sentence = sentence.split(full).join(html);
+    }
+  }
+  return sentence;
+}
+</script>
+'''
 
-back = '''{{Back}}'''
+back = '''{{FrontSide}}
+<hr>{{Back}}'''
 
 style = '''
 .card {
