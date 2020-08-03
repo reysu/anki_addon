@@ -8,7 +8,9 @@ modelList = []
 name = 'Sentence Card'
 fields = ['Front',  'Back']
 
-front = '''<{{Front}}<script>
+front = '''<div class="tag">
+	Basic｜Sentence{{#Tags}} {{/Tags}}{{Tags}}
+</div><{{Front}}<script>
 var field = document.querySelectorAll('.test');
 sentence = field[0].innerHTML;
 sentence = curlyBrackets(sentence);
@@ -31,7 +33,9 @@ function curlyBrackets(sentence){
 </script>
 '''
 
-back = '''{{FrontSide}}
+back = '''<div class="tag">
+	Basic｜Sentence{{#Tags}} {{/Tags}}{{Tags}}
+</div>{{FrontSide}}
 <hr>{{Back}}'''
 
 style = '''
@@ -59,6 +63,14 @@ font-size: 25px;
 .padded-top{
 padding-top: 15px;
 }
+.night_mode .tag{
+color: #b5b5b5;
+background-color: #475861;
+padding: 0px 5px 0px 5px;
+ border-radius: 5px;
+display: table;
+}
+
 '''
 
 
