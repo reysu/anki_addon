@@ -1,36 +1,12 @@
-<!--
-  Universal Furigana — Card Template Snippet
-  ===========================================
-  Paste this ENTIRE block at the END of both your Front Template
-  and Back Template in Anki (Cards → Front Template / Back Template).
-
-  Works on: Anki Desktop, AnkiDroid, AnkiMobile (iOS)
-
-  Syntax (use in your card fields):
-    食べる{たべる}              → furigana reading above word
-    食べる{to eat}              → English gloss above word
-    学生{がくせい;h}            → reading + heiban pitch (blue)
-    秋{あき;a}                  → reading + atamadaka pitch (red)
-    心{こころ;n2}               → reading + nakadaka pitch (orange)
-    花{はな;o}                  → reading + odaka pitch (green)
-    ぷっつり{n3}                → pitch-only (lines on base word)
-    ぷっつり{h}                 → pitch-only heiban
-    気前{きまえ;h;generosity}   → reading + pitch + ℹ tooltip
-    食べる{たべる;;to eat}      → reading + ℹ tooltip (no pitch)
-    ぷっつり{n3;snapping}       → pitch-only + ℹ tooltip
-
-  To change colors, edit the COLORS object below.
-  To change line thickness, edit LINE_PX.
--->
-
+<!-- UF-START -->
 <script>
 (function() {
-    // ===== CONFIG — edit these to customize =====
     var PITCH_ENABLED = true;
     var COLORS = {"h":"#3366CC","a":"#CC3333","n":"#DD8800","o":"#339933"};
     var LINE_PX = 2;
-    // ============================================
+    var RT_FONT_SIZE = '0.6';
 
+    // ---- Mora splitter ----
     function splitMora(kana) {
         var digraphs = '\u3083\u3085\u3087\u30e3\u30e5\u30e7\u30a1\u30a3\u30a5\u30a7\u30a9';
         var mora = [];
@@ -46,6 +22,7 @@
         return mora;
     }
 
+    // ---- Pitch pattern generator ----
     function getPitchPattern(moraCount, type, dropAt) {
         var pattern = [];
         if (type === 'h') {
@@ -66,36 +43,45 @@
         return pattern;
     }
 
+    // ---- Build pitch HTML ----
     function buildPitchHTML(reading, type, dropAt, color) {
         var mora = splitMora(reading);
         var moraCount = mora.length;
         var pattern = getPitchPattern(moraCount, type, dropAt);
         var html = '<span class="uf-pitch-word" style="display:contents;">';
+
         for (var i = 0; i < mora.length; i++) {
             var isHigh = pattern[i] === 1;
             var nextLow = (i + 1 < mora.length) ? pattern[i + 1] === 0 : false;
+
             var bTop = isHigh ? (LINE_PX + 'px solid ' + color) : 'none';
+
             var hasDrop = false;
             if (type === 'a' && i === 0) hasDrop = true;
             else if (type === 'n' && isHigh && nextLow) hasDrop = true;
             else if (type === 'o' && i === mora.length - 1) hasDrop = true;
+
             var style = 'display:inline-block;position:relative;'
                 + 'padding-top:' + (LINE_PX + 2) + 'px;'
                 + 'border-top:' + bTop + ';'
                 + 'color:' + color + ';'
                 + 'line-height:1;';
+
             html += '<span style="' + style + '">' + mora[i];
+
             if (hasDrop) {
                 html += '<span style="position:absolute;right:0;top:-' + LINE_PX + 'px;'
                     + 'width:' + LINE_PX + 'px;height:40%;'
                     + 'background:' + color + ';"></span>';
             }
+
             html += '</span>';
         }
         html += '</span>';
         return html;
     }
 
+    // ---- Pitch code detector ----
     function parsePitchCode(str) {
         if (!PITCH_ENABLED || !str) return null;
         var code = str.trim().toLowerCase();
@@ -111,12 +97,15 @@
         return null;
     }
 
+    // ---- Parse annotation ----
     function parseAnnotation(annotation, baseWord) {
         var parts = annotation.split(';');
         var reading = null;
         var pitch = null;
         var gloss = null;
+
         var firstAsPitch = parsePitchCode(parts[0]);
+
         if (firstAsPitch) {
             pitch = firstAsPitch;
             if (parts.length > 1 && parts[1].trim().length > 0) {
@@ -131,12 +120,16 @@
                 gloss = parts[2].trim();
             }
         }
+
         return { reading: reading, pitch: pitch, gloss: gloss };
     }
 
+    // ---- Main conversion ----
     function convertFurigana(rootNode) {
         var walker = document.createTreeWalker(
-            rootNode, NodeFilter.SHOW_TEXT, {
+            rootNode,
+            NodeFilter.SHOW_TEXT,
+            {
                 acceptNode: function(node) {
                     var p = node.parentNode;
                     if (!p) return NodeFilter.FILTER_REJECT;
@@ -149,19 +142,25 @@
                         return NodeFilter.FILTER_ACCEPT;
                     return NodeFilter.FILTER_REJECT;
                 }
-            }, false
+            },
+            false
         );
+
         var textNodes = [];
         while (walker.nextNode()) textNodes.push(walker.currentNode);
+
         for (var i = textNodes.length - 1; i >= 0; i--) {
             var textNode = textNodes[i];
             var text = textNode.nodeValue;
+
             var RE = /([^\s{]+?)\{([^}]+)\}/g;
             if (!RE.test(text)) continue;
             RE.lastIndex = 0;
+
             var parts = [];
             var lastIdx = 0;
             var m;
+
             while ((m = RE.exec(text)) !== null) {
                 if (m.index > lastIdx) {
                     parts.push({ t: 'txt', v: text.substring(lastIdx, m.index) });
@@ -169,10 +168,12 @@
                 parts.push({ t: 'fg', base: m[1], ann: m[2] });
                 lastIdx = m.index + m[0].length;
             }
+
             if (parts.length === 0) continue;
             if (lastIdx < text.length) {
                 parts.push({ t: 'txt', v: text.substring(lastIdx) });
             }
+
             var frag = document.createDocumentFragment();
             for (var p = 0; p < parts.length; p++) {
                 var part = parts[p];
@@ -180,23 +181,31 @@
                     frag.appendChild(document.createTextNode(part.v));
                 } else {
                     var parsed = parseAnnotation(part.ann, part.base);
+
                     if (!parsed.reading && parsed.pitch) {
                         var container = document.createElement('span');
                         container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
                                                             parsed.pitch.drop, parsed.pitch.color);
-                        if (parsed.gloss) wrapWithTooltip(container, parsed.gloss);
+                        if (parsed.gloss) {
+                            wrapWithTooltip(container, parsed.gloss);
+                        }
                         frag.appendChild(container);
+
                     } else {
                         var rtContent = '';
+
                         if (parsed.pitch && parsed.reading) {
                             rtContent += buildPitchHTML(parsed.reading, parsed.pitch.type,
                                                        parsed.pitch.drop, parsed.pitch.color);
                         } else if (parsed.reading) {
                             rtContent += '<span>' + parsed.reading + '</span>';
                         }
+
                         var ruby = document.createElement('ruby');
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
+
                         if (parsed.gloss) {
+                            // Wrap ruby in a span so tooltip escapes ruby overflow
                             var wrapper = document.createElement('span');
                             wrapper.appendChild(ruby);
                             wrapWithTooltip(wrapper, parsed.gloss);
@@ -211,35 +220,120 @@
         }
     }
 
+    // ---- Tooltip with pagination ----
+    var CHARS_PER_PAGE = 120;
+
     function wrapWithTooltip(el, text) {
         el.classList.add('uf-has-info');
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
         dot.textContent = '\u24D8';
         el.appendChild(dot);
+
         var popup = document.createElement('div');
         popup.className = 'uf-tooltip';
-        popup.textContent = text;
+
+        var pages = paginate(text);
+        popup.setAttribute('data-pages', JSON.stringify(pages));
+        popup.setAttribute('data-page', '0');
+
+        var body = document.createElement('div');
+        body.className = 'uf-tt-body';
+        popup.appendChild(body);
+
+        if (pages.length > 1) {
+            var nav = document.createElement('div');
+            nav.className = 'uf-tt-nav';
+            var prev = document.createElement('span');
+            prev.className = 'uf-tt-prev';
+            prev.textContent = '\u2039';
+            var info = document.createElement('span');
+            info.className = 'uf-tt-info';
+            var next = document.createElement('span');
+            next.className = 'uf-tt-next';
+            next.textContent = '\u203A';
+            prev.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, -1); });
+            prev.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, -1); });
+            next.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, 1); });
+            next.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, 1); });
+            nav.appendChild(prev);
+            nav.appendChild(info);
+            nav.appendChild(next);
+            popup.appendChild(nav);
+        }
+
         el.appendChild(popup);
-        // Direct touch handler for mobile
+
+        // Direct touch handler for mobile (like Migaku ontouchend)
         el.addEventListener('touchend', function(ev) {
+            // Let nav arrow taps through without toggling
+            if (ev.target.closest('.uf-tt-prev, .uf-tt-next')) return;
             ev.preventDefault();
             var p = this.querySelector('.uf-tooltip');
             if (!p) return;
-            if (p.style.display === 'block') { hidePopup(this); }
-            else { hideAllPopups(); showPopup(this); }
+            if (p.style.display === 'block') {
+                hidePopup(this);
+            } else {
+                hideAllPopups();
+                showPopup(this);
+            }
         });
+    }
+
+    function ufNavPage(popup, dir) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        idx += dir;
+        if (idx < 0) idx = 0;
+        if (idx >= pages.length) idx = pages.length - 1;
+        popup.setAttribute('data-page', idx);
+        renderPage(popup);
+    }
+
+    function paginate(text) {
+        if (text.length <= CHARS_PER_PAGE) return [text];
+        var pages = [];
+        var remaining = text;
+        while (remaining.length > 0) {
+            if (remaining.length <= CHARS_PER_PAGE) {
+                pages.push(remaining);
+                break;
+            }
+            var cut = CHARS_PER_PAGE;
+            var breakChars = '\u3002\u3001\uff0c\uff0e\uff1b.,;!? \n';
+            var best = -1;
+            for (var j = Math.floor(CHARS_PER_PAGE * 0.6); j <= cut; j++) {
+                if (breakChars.indexOf(remaining[j]) !== -1) best = j + 1;
+            }
+            if (best > 0) cut = best;
+            pages.push(remaining.substring(0, cut));
+            remaining = remaining.substring(cut);
+        }
+        return pages;
+    }
+
+    function renderPage(popup) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        var body = popup.querySelector('.uf-tt-body');
+        body.textContent = pages[idx];
+        var info = popup.querySelector('.uf-tt-info');
+        if (info) info.textContent = (idx + 1) + '/' + pages.length;
+        var prev = popup.querySelector('.uf-tt-prev');
+        var next = popup.querySelector('.uf-tt-next');
+        if (prev) prev.style.opacity = idx > 0 ? '1' : '0.25';
+        if (next) next.style.opacity = idx < pages.length - 1 ? '1' : '0.25';
     }
 
     function showPopup(el) {
         var popup = el.querySelector('.uf-tooltip');
         if (!popup) return;
+        popup.setAttribute('data-page', '0');
+        renderPage(popup);
         popup.style.display = 'block';
         popup.style.position = 'absolute';
         popup.style.left = '0px';
         popup.style.top = el.offsetHeight + 'px';
-        popup.style.maxHeight = '';
-        popup.style.overflowY = '';
         var pRect = popup.getBoundingClientRect();
         var card = el.closest('.card') || document.body;
         var cardRect = card.getBoundingClientRect();
@@ -250,18 +344,8 @@
         }
         if (pRect.left < 4) popup.style.left = (4 - el.getBoundingClientRect().left) + 'px';
         pRect = popup.getBoundingClientRect();
-        var spaceBelow = window.innerHeight - pRect.top;
-        var spaceAbove = el.getBoundingClientRect().top;
-        if (pRect.height <= spaceBelow) {
-        } else if (pRect.height <= spaceAbove) {
+        if (pRect.top + pRect.height > window.innerHeight) {
             popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
-        } else {
-            var usable = Math.max(spaceBelow, spaceAbove);
-            if (spaceAbove > spaceBelow) {
-                popup.style.top = '-' + (Math.min(popup.offsetHeight, usable) + 3) + 'px';
-            }
-            popup.style.maxHeight = (usable - 10) + 'px';
-            popup.style.overflowY = 'auto';
         }
     }
 
@@ -283,8 +367,9 @@
         }
     }
 
-    var _pinned = null;
+    var _pinned = null; // currently pinned .uf-has-info element
 
+    // Desktop: hover to preview (only when nothing is pinned)
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el && !_pinned) showPopup(el);
@@ -293,23 +378,32 @@
         var el = e.target.closest('.uf-has-info');
         if (el && !_pinned) hidePopup(el);
     }, true);
+
+    // Click to pin/unpin (desktop + mobile fallback)
     document.body.addEventListener('click', function(e) {
+        // Let nav arrows work without toggling pin
+        if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
         var el = e.target.closest('.uf-has-info');
         if (el) {
             if (_pinned === el) {
+                // Clicking the same word: unpin and hide
                 _pinned = null;
                 hidePopup(el);
             } else {
+                // Pin this word open
                 if (_pinned) hidePopup(_pinned);
                 _pinned = el;
                 hideAllPopups();
                 showPopup(el);
             }
         } else {
+            // Clicked outside: unpin and hide all
             _pinned = null;
             hideAllPopups();
         }
     });
+
+    // Mobile: tap outside to dismiss all popups
     document.body.addEventListener('touchend', function(e) {
         if (!e.target.closest('.uf-has-info')) {
             _pinned = null;
@@ -362,18 +456,57 @@
 <style>
 ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
+
+/* Info tooltip system */
 .uf-has-info { position: relative; cursor: help; }
 .uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
 .uf-info-dot {
-    font-size: 0.45em; vertical-align: super; opacity: 0.35;
-    margin-left: 1px; cursor: help; position: relative; top: -0.5em;
+    font-size: 0.45em;
+    vertical-align: super;
+    opacity: 0.35;
+    margin-left: 1px;
+    cursor: help;
+    position: relative;
+    top: -0.5em;
 }
 .uf-tooltip {
-    display: none; position: absolute; z-index: 99999;
-    background: #2a2a3e; color: #ddd; border: 1px solid #555;
-    border-radius: 6px; padding: 6px 10px; font-size: 14px;
-    line-height: 1.5; width: max-content; max-width: min(75vw, 320px); max-height: 30vh; overflow-y: auto;
+    display: none;
+    position: absolute;
+    z-index: 99999;
+    background: #2a2a3e;
+    color: #ddd;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 14px;
+    line-height: 1.5;
+    width: max-content;
+    max-width: min(75vw, 320px);
+    max-height: 30vh;
+    overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: none; white-space: normal; word-wrap: break-word;
+    pointer-events: auto;
+    white-space: normal;
+    word-wrap: break-word;
 }
+.uf-tt-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+    padding-top: 5px;
+    border-top: 1px solid #444;
+    font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.uf-tt-prev, .uf-tt-next {
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.08);
+}
+.uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
+.uf-tt-info { color: #999; font-size: 11px; }
 </style>
+<!-- UF-END -->

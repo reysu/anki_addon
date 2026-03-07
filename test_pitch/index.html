@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Universal Furigana - Test Page</title>
+<style>
+body { font-family: "Hiragino Sans", "Yu Gothic", sans-serif; font-size: 28px; padding: 30px; background: #1a1a2e; color: #e0e0e0; line-height: 2.2; }
+.card { max-width: 700px; margin: 0 auto; }
+h3 { font-size: 16px; color: #888; margin: 30px 0 8px 0; border-bottom: 1px solid #333; padding-bottom: 4px; }
+.example { margin: 8px 0; }
+</style>
+</head>
+<body>
+<div class="card">
+
+<h3>Pagination test (click the word, then click arrows):</h3>
+<div class="example">由来：中国の 春秋戦国時代{しゅんじゅうせんごくじだい;n7;the Spring and Autumn / Warring States period (roughly 770–221 BCE). This is often treated as one compound, but it’s technically two eras春秋時代 + 戦国時代.}</div>
+
+<h3>Unknown pitch with ? (reading + tooltip, no pitch):</h3>
+<div class="example">何{なに;?;what / something — used in casual speech}</div>
+
+<h3>Normal pitch types:</h3>
+<div class="example">学生{がくせい;h;student} 秋{あき;a;autumn} 心{こころ;n2;heart/mind} 花{はな;o;flower}</div>
+
+<h3>Pitch-only with tooltip:</h3>
+<div class="example">ぷっつり{n3;snapping}</div>
+
+</div>
+
+<script>
+(function() {
+    var PITCH_ENABLED = true;
+    var COLORS = {"h":"#3366CC","a":"#CC3333","n":"#DD8800","o":"#339933"};
+    var LINE_PX = 2;
+    var RT_FONT_SIZE = '0.6';
+
+    // ---- Mora splitter ----
+    function splitMora(kana) {
+        var digraphs = '\u3083\u3085\u3087\u30e3\u30e5\u30e7\u30a1\u30a3\u30a5\u30a7\u30a9';
+        var mora = [];
+        for (var i = 0; i < kana.length; i++) {
+            var ch = kana[i];
+            if (i + 1 < kana.length && digraphs.indexOf(kana[i + 1]) !== -1) {
+                mora.push(ch + kana[i + 1]);
+                i++;
+            } else {
+                mora.push(ch);
+            }
+        }
+        return mora;
+    }
+
+    // ---- Pitch pattern generator ----
+    function getPitchPattern(moraCount, type, dropAt) {
+        var pattern = [];
+        if (type === 'h') {
+            pattern.push(0);
+            for (var i = 1; i < moraCount; i++) pattern.push(1);
+        } else if (type === 'a') {
+            pattern.push(1);
+            for (var i = 1; i < moraCount; i++) pattern.push(0);
+        } else if (type === 'o') {
+            pattern.push(0);
+            for (var i = 1; i < moraCount; i++) pattern.push(1);
+        } else if (type === 'n') {
+            pattern.push(0);
+            for (var i = 1; i < moraCount; i++) {
+                pattern.push(i < dropAt ? 1 : 0);
+            }
+        }
+        return pattern;
+    }
+
+    // ---- Build pitch HTML ----
+    function buildPitchHTML(reading, type, dropAt, color) {
+        var mora = splitMora(reading);
+        var moraCount = mora.length;
+        var pattern = getPitchPattern(moraCount, type, dropAt);
+        var html = '<span class="uf-pitch-word" style="display:contents;">';
+
+        for (var i = 0; i < mora.length; i++) {
+            var isHigh = pattern[i] === 1;
+            var nextLow = (i + 1 < mora.length) ? pattern[i + 1] === 0 : false;
+
+            var bTop = isHigh ? (LINE_PX + 'px solid ' + color) : 'none';
+
+            var hasDrop = false;
+            if (type === 'a' && i === 0) hasDrop = true;
+            else if (type === 'n' && isHigh && nextLow) hasDrop = true;
+            else if (type === 'o' && i === mora.length - 1) hasDrop = true;
+
+            var style = 'display:inline-block;position:relative;'
+                + 'padding-top:' + (LINE_PX + 2) + 'px;'
+                + 'border-top:' + bTop + ';'
+                + 'color:' + color + ';'
+                + 'line-height:1;';
+
+            html += '<span style="' + style + '">' + mora[i];
+
+            if (hasDrop) {
+                html += '<span style="position:absolute;right:0;top:-' + LINE_PX + 'px;'
+                    + 'width:' + LINE_PX + 'px;height:40%;'
+                    + 'background:' + color + ';"></span>';
+            }
+
+            html += '</span>';
+        }
+        html += '</span>';
+        return html;
+    }
+
+    // ---- Pitch code detector ----
+    function parsePitchCode(str) {
+        if (!PITCH_ENABLED || !str) return null;
+        var code = str.trim().toLowerCase();
+        if (code === 'h' || code === 'a' || code === 'o') {
+            return { type: code, drop: 0, color: COLORS[code] };
+        }
+        if (code.charAt(0) === 'n' && code.length > 1) {
+            var drop = parseInt(code.substring(1), 10);
+            if (!isNaN(drop) && drop > 0) {
+                return { type: 'n', drop: drop, color: COLORS['n'] };
+            }
+        }
+        return null;
+    }
+
+    // ---- Parse annotation ----
+    function parseAnnotation(annotation, baseWord) {
+        var parts = annotation.split(';');
+        var reading = null;
+        var pitch = null;
+        var gloss = null;
+
+        var firstAsPitch = parsePitchCode(parts[0]);
+
+        if (firstAsPitch) {
+            pitch = firstAsPitch;
+            if (parts.length > 1 && parts[1].trim().length > 0) {
+                gloss = parts[1].trim();
+            }
+        } else {
+            reading = parts[0];
+            if (parts.length > 1) {
+                pitch = parsePitchCode(parts[1]);
+            }
+            if (parts.length > 2 && parts[2].trim().length > 0) {
+                gloss = parts[2].trim();
+            }
+        }
+
+        return { reading: reading, pitch: pitch, gloss: gloss };
+    }
+
+    // ---- Main conversion ----
+    function convertFurigana(rootNode) {
+        var walker = document.createTreeWalker(
+            rootNode,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: function(node) {
+                    var p = node.parentNode;
+                    if (!p) return NodeFilter.FILTER_REJECT;
+                    var tag = p.tagName;
+                    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'RT')
+                        return NodeFilter.FILTER_REJECT;
+                    if (p.classList && p.classList.contains('uf-pitch-word'))
+                        return NodeFilter.FILTER_REJECT;
+                    if (node.nodeValue && node.nodeValue.indexOf('{') !== -1)
+                        return NodeFilter.FILTER_ACCEPT;
+                    return NodeFilter.FILTER_REJECT;
+                }
+            },
+            false
+        );
+
+        var textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+        for (var i = textNodes.length - 1; i >= 0; i--) {
+            var textNode = textNodes[i];
+            var text = textNode.nodeValue;
+
+            var RE = /([^\s{]+?)\{([^}]+)\}/g;
+            if (!RE.test(text)) continue;
+            RE.lastIndex = 0;
+
+            var parts = [];
+            var lastIdx = 0;
+            var m;
+
+            while ((m = RE.exec(text)) !== null) {
+                if (m.index > lastIdx) {
+                    parts.push({ t: 'txt', v: text.substring(lastIdx, m.index) });
+                }
+                parts.push({ t: 'fg', base: m[1], ann: m[2] });
+                lastIdx = m.index + m[0].length;
+            }
+
+            if (parts.length === 0) continue;
+            if (lastIdx < text.length) {
+                parts.push({ t: 'txt', v: text.substring(lastIdx) });
+            }
+
+            var frag = document.createDocumentFragment();
+            for (var p = 0; p < parts.length; p++) {
+                var part = parts[p];
+                if (part.t === 'txt') {
+                    frag.appendChild(document.createTextNode(part.v));
+                } else {
+                    var parsed = parseAnnotation(part.ann, part.base);
+
+                    if (!parsed.reading && parsed.pitch) {
+                        var container = document.createElement('span');
+                        container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
+                                                            parsed.pitch.drop, parsed.pitch.color);
+                        if (parsed.gloss) {
+                            wrapWithTooltip(container, parsed.gloss);
+                        }
+                        frag.appendChild(container);
+
+                    } else {
+                        var rtContent = '';
+
+                        if (parsed.pitch && parsed.reading) {
+                            rtContent += buildPitchHTML(parsed.reading, parsed.pitch.type,
+                                                       parsed.pitch.drop, parsed.pitch.color);
+                        } else if (parsed.reading) {
+                            rtContent += '<span>' + parsed.reading + '</span>';
+                        }
+
+                        var ruby = document.createElement('ruby');
+                        ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
+
+                        if (parsed.gloss) {
+                            // Wrap ruby in a span so tooltip escapes ruby overflow
+                            var wrapper = document.createElement('span');
+                            wrapper.appendChild(ruby);
+                            wrapWithTooltip(wrapper, parsed.gloss);
+                            frag.appendChild(wrapper);
+                        } else {
+                            frag.appendChild(ruby);
+                        }
+                    }
+                }
+            }
+            textNode.parentNode.replaceChild(frag, textNode);
+        }
+    }
+
+    // ---- Tooltip with pagination ----
+    var CHARS_PER_PAGE = 120;
+
+    function wrapWithTooltip(el, text) {
+        el.classList.add('uf-has-info');
+        var dot = document.createElement('span');
+        dot.className = 'uf-info-dot';
+        dot.textContent = '\u24D8';
+        el.appendChild(dot);
+
+        var popup = document.createElement('div');
+        popup.className = 'uf-tooltip';
+
+        var pages = paginate(text);
+        popup.setAttribute('data-pages', JSON.stringify(pages));
+        popup.setAttribute('data-page', '0');
+
+        var body = document.createElement('div');
+        body.className = 'uf-tt-body';
+        popup.appendChild(body);
+
+        if (pages.length > 1) {
+            var nav = document.createElement('div');
+            nav.className = 'uf-tt-nav';
+            var prev = document.createElement('span');
+            prev.className = 'uf-tt-prev';
+            prev.textContent = '\u2039';
+            var info = document.createElement('span');
+            info.className = 'uf-tt-info';
+            var next = document.createElement('span');
+            next.className = 'uf-tt-next';
+            next.textContent = '\u203A';
+            prev.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, -1); });
+            prev.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, -1); });
+            next.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, 1); });
+            next.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, 1); });
+            nav.appendChild(prev);
+            nav.appendChild(info);
+            nav.appendChild(next);
+            popup.appendChild(nav);
+        }
+
+        el.appendChild(popup);
+
+        // Direct touch handler for mobile (like Migaku ontouchend)
+        el.addEventListener('touchend', function(ev) {
+            // Let nav arrow taps through without toggling
+            if (ev.target.closest('.uf-tt-prev, .uf-tt-next')) return;
+            ev.preventDefault();
+            var p = this.querySelector('.uf-tooltip');
+            if (!p) return;
+            if (p.style.display === 'block') {
+                hidePopup(this);
+            } else {
+                hideAllPopups();
+                showPopup(this);
+            }
+        });
+    }
+
+    function ufNavPage(popup, dir) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        idx += dir;
+        if (idx < 0) idx = 0;
+        if (idx >= pages.length) idx = pages.length - 1;
+        popup.setAttribute('data-page', idx);
+        renderPage(popup);
+    }
+
+    function paginate(text) {
+        if (text.length <= CHARS_PER_PAGE) return [text];
+        var pages = [];
+        var remaining = text;
+        while (remaining.length > 0) {
+            if (remaining.length <= CHARS_PER_PAGE) {
+                pages.push(remaining);
+                break;
+            }
+            var cut = CHARS_PER_PAGE;
+            var breakChars = '\u3002\u3001\uff0c\uff0e\uff1b.,;!? \n';
+            var best = -1;
+            for (var j = Math.floor(CHARS_PER_PAGE * 0.6); j <= cut; j++) {
+                if (breakChars.indexOf(remaining[j]) !== -1) best = j + 1;
+            }
+            if (best > 0) cut = best;
+            pages.push(remaining.substring(0, cut));
+            remaining = remaining.substring(cut);
+        }
+        return pages;
+    }
+
+    function renderPage(popup) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        var body = popup.querySelector('.uf-tt-body');
+        body.textContent = pages[idx];
+        var info = popup.querySelector('.uf-tt-info');
+        if (info) info.textContent = (idx + 1) + '/' + pages.length;
+        var prev = popup.querySelector('.uf-tt-prev');
+        var next = popup.querySelector('.uf-tt-next');
+        if (prev) prev.style.opacity = idx > 0 ? '1' : '0.25';
+        if (next) next.style.opacity = idx < pages.length - 1 ? '1' : '0.25';
+    }
+
+    function showPopup(el) {
+        var popup = el.querySelector('.uf-tooltip');
+        if (!popup) return;
+        popup.setAttribute('data-page', '0');
+        renderPage(popup);
+        popup.style.display = 'block';
+        popup.style.position = 'absolute';
+        popup.style.left = '0px';
+        popup.style.top = el.offsetHeight + 'px';
+        var pRect = popup.getBoundingClientRect();
+        var card = el.closest('.card') || document.body;
+        var cardRect = card.getBoundingClientRect();
+        var rightEdge = pRect.left + pRect.width;
+        var limit = cardRect.left + cardRect.width;
+        if (rightEdge > limit) {
+            popup.style.left = '-' + (rightEdge - limit + 4) + 'px';
+        }
+        if (pRect.left < 4) popup.style.left = (4 - el.getBoundingClientRect().left) + 'px';
+        pRect = popup.getBoundingClientRect();
+        if (pRect.top + pRect.height > window.innerHeight) {
+            popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
+        }
+    }
+
+    function hidePopup(el) {
+        var popup = el.querySelector('.uf-tooltip');
+        if (popup) {
+            popup.style.display = 'none';
+            popup.style.left = '';
+            popup.style.top = '';
+        }
+    }
+
+    function hideAllPopups() {
+        var popups = document.getElementsByClassName('uf-tooltip');
+        for (var i = 0; i < popups.length; i++) {
+            popups[i].style.display = 'none';
+            popups[i].style.left = '';
+            popups[i].style.top = '';
+        }
+    }
+
+    var _pinned = null; // currently pinned .uf-has-info element
+
+    // Desktop: hover to preview (only when nothing is pinned)
+    document.body.addEventListener('mouseenter', function(e) {
+        var el = e.target.closest('.uf-has-info');
+        if (el && !_pinned) showPopup(el);
+    }, true);
+    document.body.addEventListener('mouseleave', function(e) {
+        var el = e.target.closest('.uf-has-info');
+        if (el && !_pinned) hidePopup(el);
+    }, true);
+
+    // Click to pin/unpin (desktop + mobile fallback)
+    document.body.addEventListener('click', function(e) {
+        // Let nav arrows work without toggling pin
+        if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
+        var el = e.target.closest('.uf-has-info');
+        if (el) {
+            if (_pinned === el) {
+                // Clicking the same word: unpin and hide
+                _pinned = null;
+                hidePopup(el);
+            } else {
+                // Pin this word open
+                if (_pinned) hidePopup(_pinned);
+                _pinned = el;
+                hideAllPopups();
+                showPopup(el);
+            }
+        } else {
+            // Clicked outside: unpin and hide all
+            _pinned = null;
+            hideAllPopups();
+        }
+    });
+
+    // Mobile: tap outside to dismiss all popups
+    document.body.addEventListener('touchend', function(e) {
+        if (!e.target.closest('.uf-has-info')) {
+            _pinned = null;
+            hideAllPopups();
+        }
+    });
+
+    function processCard() {
+        var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
+        var done = false;
+        for (var s = 0; s < sels.length; s++) {
+            var els = document.querySelectorAll(sels[s]);
+            for (var i = 0; i < els.length; i++) {
+                if (els[i].textContent.indexOf('{') !== -1) {
+                    convertFurigana(els[i]);
+                    done = true;
+                }
+            }
+        }
+        if (!done && document.body && document.body.textContent.indexOf('{') !== -1) {
+            convertFurigana(document.body);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', processCard);
+    } else {
+        processCard();
+    }
+
+    if (typeof MutationObserver !== 'undefined') {
+        var _seen = new WeakSet();
+        new MutationObserver(function(muts) {
+            for (var m = 0; m < muts.length; m++) {
+                var nodes = muts[m].addedNodes;
+                for (var n = 0; n < nodes.length; n++) {
+                    var nd = nodes[n];
+                    if (nd.nodeType === 1 && !_seen.has(nd) &&
+                        nd.textContent && nd.textContent.indexOf('{') !== -1) {
+                        _seen.add(nd);
+                        convertFurigana(nd);
+                    }
+                }
+            }
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+})();
+</script>
+
+<style>
+ruby { ruby-align: center; ruby-position: over; }
+ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
+
+/* Info tooltip system */
+.uf-has-info { position: relative; cursor: help; }
+.uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
+.uf-info-dot {
+    font-size: 0.45em;
+    vertical-align: super;
+    opacity: 0.35;
+    margin-left: 1px;
+    cursor: help;
+    position: relative;
+    top: -0.5em;
+}
+.uf-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 99999;
+    background: #2a2a3e;
+    color: #ddd;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 14px;
+    line-height: 1.5;
+    width: max-content;
+    max-width: min(75vw, 320px);
+    max-height: 30vh;
+    overflow-y: auto;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    pointer-events: auto;
+    white-space: normal;
+    word-wrap: break-word;
+}
+.uf-tt-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+    padding-top: 5px;
+    border-top: 1px solid #444;
+    font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.uf-tt-prev, .uf-tt-next {
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.08);
+}
+.uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
+.uf-tt-info { color: #999; font-size: 11px; }
+</style>
+</body>
+</html>

@@ -16,7 +16,8 @@ Syntax:
   word{reading;o}        -> odaka pitch accent (green, drop after last)
   word{pitch}            -> pitch-only (lines on base word, no ruby)
   word{reading;pitch;desc} -> reading + pitch + info tooltip
-  word{pitch;desc}       -> pitch-only + info tooltip
+  word{reading;?;desc}     -> reading + info tooltip (unknown pitch)
+  word{pitch;desc}         -> pitch-only + info tooltip
 
 Author: Eric Su (reysu)
 """
@@ -321,12 +322,12 @@ _SCRIPT_TEMPLATE = r"""
             nav.className = 'uf-tt-nav';
             var prev = document.createElement('span');
             prev.className = 'uf-tt-prev';
-            prev.textContent = '\u25C0';
+            prev.textContent = '\u2039';
             var info = document.createElement('span');
             info.className = 'uf-tt-info';
             var next = document.createElement('span');
             next.className = 'uf-tt-next';
-            next.textContent = '\u25B6';
+            next.textContent = '\u203A';
             prev.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, -1); });
             prev.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, -1); });
             next.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, 1); });
@@ -341,6 +342,8 @@ _SCRIPT_TEMPLATE = r"""
 
         // Direct touch handler for mobile (like Migaku ontouchend)
         el.addEventListener('touchend', function(ev) {
+            // Let nav arrow taps through without toggling
+            if (ev.target.closest('.uf-tt-prev, .uf-tt-next')) return;
             ev.preventDefault();
             var p = this.querySelector('.uf-tooltip');
             if (!p) return;
@@ -769,7 +772,7 @@ class SettingsDialog(QDialog):
             "<b>Info Tooltip (hover/tap)</b><br>"
             "Add a description as the last segment \u2014 it shows as a \u24D8 tooltip:<br>"
             "<code>\u6c17\u524d{\u304d\u307e\u3048;h;generosity}</code> \u2192 reading + pitch + tooltip<br>"
-            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;;to eat}</code> \u2192 reading + tooltip (no pitch)<br>"
+            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;?;to eat}</code> \u2192 reading + tooltip (no pitch)<br>"
             "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch-only + tooltip<br>"
             "Hover on desktop or tap on mobile to see the description.<br>"
             "Tap elsewhere to dismiss on mobile.<br><br>"
