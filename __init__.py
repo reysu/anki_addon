@@ -28,7 +28,8 @@ from aqt import mw, gui_hooks
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QPushButton, QColorDialog, QGroupBox, QGridLayout,
-    QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox
+    QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox,
+    QDoubleSpinBox
 )
 
 
@@ -44,6 +45,7 @@ _DEFAULT_CONFIG = {
     "color_nakadaka": "#DD8800",
     "color_odaka": "#339933",
     "line_thickness": 2,
+    "furigana_font_size": 0.6,  # em units, relative to base text
     "injected_templates": [],  # list of "NoteType::CardName::side" entries
 }
 
@@ -77,6 +79,7 @@ _SCRIPT_TEMPLATE = r"""
     var PITCH_ENABLED = %%PITCH_ENABLED%%;
     var COLORS = %%COLORS%%;
     var LINE_PX = %%LINE_PX%%;
+    var RT_FONT_SIZE = '%%RT_FONT_SIZE%%';
 
     // ---- Mora splitter ----
     function splitMora(kana) {
@@ -324,8 +327,8 @@ _SCRIPT_TEMPLATE = r"""
         if (left < 4) left = 4;
         if (left + ttRect.width > window.innerWidth - 4) left = window.innerWidth - ttRect.width - 4;
         if (top < 4) top = rect.bottom + 6;
-        tt.style.left = left + window.scrollX + 'px';
-        tt.style.top = top + window.scrollY + 'px';
+        tt.style.left = left + 'px';
+        tt.style.top = top + 'px';
     }
 
     function hideTooltip() {
@@ -397,7 +400,7 @@ _SCRIPT_TEMPLATE = r"""
 
 <style>
 ruby { ruby-align: center; ruby-position: over; }
-ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
+ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
 .uf-pitch-word span { font-size: 1em; }
 
 /* Info tooltip system */
@@ -414,7 +417,7 @@ ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; 
 }
 .uf-tooltip {
     display: none;
-    position: absolute;
+    position: fixed;
     z-index: 99999;
     background: #2a2a3e;
     color: #ddd;
@@ -448,6 +451,8 @@ def _build_script(cfg):
     script = script.replace("%%PITCH_ENABLED%%", pitch_enabled)
     script = script.replace("%%COLORS%%", colors)
     script = script.replace("%%LINE_PX%%", thickness)
+    rt_size = str(cfg.get("furigana_font_size", 0.6))
+    script = script.replace("%%RT_FONT_SIZE%%", rt_size)
     return script
 
 
@@ -659,6 +664,23 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(color_group)
 
+        # -- Furigana font size --
+        font_group = QGroupBox("Furigana Font Size")
+        font_layout = QHBoxLayout(font_group)
+        font_layout.addWidget(QLabel("Size (em):"))
+        self.font_spin = QDoubleSpinBox()
+        self.font_spin.setRange(0.3, 1.5)
+        self.font_spin.setSingleStep(0.05)
+        self.font_spin.setDecimals(2)
+        self.font_spin.setValue(self.cfg.get("furigana_font_size", 0.6))
+        self.font_spin.setToolTip(
+            "Controls how large the furigana text is relative to the base text. "
+            "Smaller values = smaller furigana. Default: 0.60"
+        )
+        font_layout.addWidget(self.font_spin)
+        font_layout.addStretch()
+        layout.addWidget(font_group)
+
         # -- Mobile compatibility: template injection --
         mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
         mobile_layout = QVBoxLayout(mobile_group)
@@ -745,6 +767,7 @@ class SettingsDialog(QDialog):
     def _on_save(self):
         self.cfg["enabled"] = self.enabled_cb.isChecked()
         self.cfg["pitch_accent_enabled"] = self.pitch_cb.isChecked()
+        self.cfg["furigana_font_size"] = round(self.font_spin.value(), 2)
         for key, btn in self._color_buttons.items():
             self.cfg[key] = btn.color()
 
@@ -766,6 +789,7 @@ class SettingsDialog(QDialog):
         self.cfg = dict(_DEFAULT_CONFIG)
         self.enabled_cb.setChecked(True)
         self.pitch_cb.setChecked(True)
+        self.font_spin.setValue(_DEFAULT_CONFIG["furigana_font_size"])
         for key, btn in self._color_buttons.items():
             btn._color = _DEFAULT_CONFIG[key]
             btn._update_style()
