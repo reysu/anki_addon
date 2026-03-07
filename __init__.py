@@ -291,28 +291,91 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
-    // ---- Tooltip helper (Migaku-style: popup is a child of the word) ----
+    // ---- Tooltip with pagination ----
+    var CHARS_PER_PAGE = 120;
+
     function wrapWithTooltip(el, text) {
         el.classList.add('uf-has-info');
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
         dot.textContent = '\u24D8';
         el.appendChild(dot);
+
         var popup = document.createElement('div');
         popup.className = 'uf-tooltip';
-        popup.textContent = text;
+
+        var pages = paginate(text);
+        popup.setAttribute('data-pages', JSON.stringify(pages));
+        popup.setAttribute('data-page', '0');
+
+        var body = document.createElement('div');
+        body.className = 'uf-tt-body';
+        popup.appendChild(body);
+
+        if (pages.length > 1) {
+            var nav = document.createElement('div');
+            nav.className = 'uf-tt-nav';
+            var prev = document.createElement('span');
+            prev.className = 'uf-tt-prev';
+            prev.textContent = '\u25C0';
+            var info = document.createElement('span');
+            info.className = 'uf-tt-info';
+            var next = document.createElement('span');
+            next.className = 'uf-tt-next';
+            next.textContent = '\u25B6';
+            nav.appendChild(prev);
+            nav.appendChild(info);
+            nav.appendChild(next);
+            popup.appendChild(nav);
+        }
+
         el.appendChild(popup);
+    }
+
+    function paginate(text) {
+        if (text.length <= CHARS_PER_PAGE) return [text];
+        var pages = [];
+        var remaining = text;
+        while (remaining.length > 0) {
+            if (remaining.length <= CHARS_PER_PAGE) {
+                pages.push(remaining);
+                break;
+            }
+            var cut = CHARS_PER_PAGE;
+            var breakChars = '\u3002\u3001\uff0c\uff0e\uff1b.,;!? \n';
+            var best = -1;
+            for (var j = Math.floor(CHARS_PER_PAGE * 0.6); j <= cut; j++) {
+                if (breakChars.indexOf(remaining[j]) !== -1) best = j + 1;
+            }
+            if (best > 0) cut = best;
+            pages.push(remaining.substring(0, cut));
+            remaining = remaining.substring(cut);
+        }
+        return pages;
+    }
+
+    function renderPage(popup) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        var body = popup.querySelector('.uf-tt-body');
+        body.textContent = pages[idx];
+        var info = popup.querySelector('.uf-tt-info');
+        if (info) info.textContent = (idx + 1) + '/' + pages.length;
+        var prev = popup.querySelector('.uf-tt-prev');
+        var next = popup.querySelector('.uf-tt-next');
+        if (prev) prev.style.opacity = idx > 0 ? '1' : '0.25';
+        if (next) next.style.opacity = idx < pages.length - 1 ? '1' : '0.25';
     }
 
     function showPopup(el) {
         var popup = el.querySelector('.uf-tooltip');
         if (!popup) return;
+        popup.setAttribute('data-page', '0');
+        renderPage(popup);
         popup.style.display = 'block';
         popup.style.position = 'absolute';
         popup.style.left = '0px';
         popup.style.top = el.offsetHeight + 'px';
-        popup.style.maxHeight = '';
-        popup.style.overflowY = '';
         var pRect = popup.getBoundingClientRect();
         var card = el.closest('.card') || document.body;
         var cardRect = card.getBoundingClientRect();
@@ -323,19 +386,8 @@ _SCRIPT_TEMPLATE = r"""
         }
         if (pRect.left < 4) popup.style.left = (4 - el.getBoundingClientRect().left) + 'px';
         pRect = popup.getBoundingClientRect();
-        var spaceBelow = window.innerHeight - pRect.top;
-        var spaceAbove = el.getBoundingClientRect().top;
-        if (pRect.height <= spaceBelow) {
-            // fits below, do nothing
-        } else if (pRect.height <= spaceAbove) {
+        if (pRect.top + pRect.height > window.innerHeight) {
             popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
-        } else {
-            var usable = Math.max(spaceBelow, spaceAbove);
-            if (spaceAbove > spaceBelow) {
-                popup.style.top = '-' + (Math.min(popup.offsetHeight, usable) + 3) + 'px';
-            }
-            popup.style.maxHeight = (usable - 10) + 'px';
-            popup.style.overflowY = 'auto';
         }
     }
 
@@ -366,6 +418,18 @@ _SCRIPT_TEMPLATE = r"""
         if (el) hidePopup(el);
     }, true);
     document.body.addEventListener('click', function(e) {
+        var nav = e.target.closest('.uf-tt-prev, .uf-tt-next');
+        if (nav) {
+            var popup = nav.closest('.uf-tooltip');
+            var pages = JSON.parse(popup.getAttribute('data-pages'));
+            var idx = parseInt(popup.getAttribute('data-page'), 10);
+            if (nav.classList.contains('uf-tt-prev') && idx > 0) idx--;
+            if (nav.classList.contains('uf-tt-next') && idx < pages.length - 1) idx++;
+            popup.setAttribute('data-page', idx);
+            renderPage(popup);
+            e.stopPropagation();
+            return;
+        }
         var el = e.target.closest('.uf-has-info');
         if (el) {
             var popup = el.querySelector('.uf-tooltip');
@@ -447,15 +511,37 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     color: #ddd;
     border: 1px solid #555;
     border-radius: 6px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     font-size: 14px;
-    line-height: 1.4;
-    max-width: min(80vw, 450px);
+    line-height: 1.5;
+    width: 80vw;
+    max-width: 500px;
+    max-height: 28vh;
+    overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: none;
+    pointer-events: auto;
     white-space: normal;
     word-wrap: break-word;
 }
+.uf-tt-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+    padding-top: 5px;
+    border-top: 1px solid #444;
+    font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.uf-tt-prev, .uf-tt-next {
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.08);
+}
+.uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
+.uf-tt-info { color: #999; font-size: 11px; }
 </style>
 """
 
