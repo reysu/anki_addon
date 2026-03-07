@@ -1,86 +1,39 @@
-"""
-Universal Furigana Add-on for Anki (v5)
-========================================
-Converts {annotation} syntax into ruby text on ANY card, ANY field.
-Supports pitch accent visualization with colored lines above mora.
-Info tooltips via hover (desktop) or tap (mobile).
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Universal Furigana - Test Page</title>
+<style>
+body { font-family: "Hiragino Sans", "Yu Gothic", sans-serif; font-size: 28px; padding: 30px; background: #1a1a2e; color: #e0e0e0; line-height: 2.2; }
+.card { max-width: 700px; margin: 0 auto; }
+h3 { font-size: 16px; color: #888; margin: 30px 0 8px 0; border-bottom: 1px solid #333; padding-bottom: 4px; }
+.example { margin: 8px 0; }
+</style>
+</head>
+<body>
+<div class="card">
 
-Works on desktop (Anki 2.1.x) via card_will_show hook.
-Works on mobile (AnkiDroid / AnkiMobile) via template injection.
+<h3>Pagination test (click the word, then click arrows):</h3>
+<div class="example">由来：中国の 春秋戦国時代{しゅんじゅうせんごくじだい;n7;the Spring and Autumn / Warring States period (roughly 770–221 BCE). This is often treated as one compound, but it’s technically two eras春秋時代 + 戦国時代.}</div>
 
-Syntax:
-  word{reading}          -> furigana reading above word
-  word{reading;h}        -> heiban pitch accent (blue, flat line)
-  word{reading;a}        -> atamadaka pitch accent (red, drop after 1st)
-  word{reading;nX}       -> nakadaka pitch accent (orange, drop after Xth mora)
-  word{reading;o}        -> odaka pitch accent (green, drop after last)
-  word{pitch}            -> pitch-only (lines on base word, no ruby)
-  word{reading;pitch;desc} -> reading + pitch + info tooltip
-  word{reading;?;desc}     -> reading + info tooltip (unknown pitch)
-  word{pitch;desc}         -> pitch-only + info tooltip
+<h3>Unknown pitch with ? (reading + tooltip, no pitch):</h3>
+<div class="example">何{なに;?;what / something — used in casual speech}</div>
 
-Author: Eric Su (reysu)
-"""
+<h3>Normal pitch types:</h3>
+<div class="example">学生{がくせい;h;student} 秋{あき;a;autumn} 心{こころ;n2;heart/mind} 花{はな;o;flower}</div>
 
-import json
-import os
-import re
-from aqt import mw, gui_hooks
-from aqt.qt import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
-    QPushButton, QColorDialog, QGroupBox, QGridLayout,
-    QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox,
-    QDoubleSpinBox
-)
+<h3>Pitch-only with tooltip:</h3>
+<div class="example">ぷっつり{n3;snapping}</div>
 
+</div>
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-
-_DEFAULT_CONFIG = {
-    "enabled": True,
-    "pitch_accent_enabled": True,
-    "color_heiban": "#3366CC",
-    "color_atamadaka": "#CC3333",
-    "color_nakadaka": "#DD8800",
-    "color_odaka": "#339933",
-    "line_thickness": 2,
-    "furigana_font_size": 0.6,  # em units, relative to base text
-    "injected_templates": [],  # list of "NoteType::CardName::side" entries
-}
-
-
-def _get_config():
-    cfg = mw.addonManager.getConfig(__name__) or {}
-    merged = dict(_DEFAULT_CONFIG)
-    merged.update(cfg)
-    return merged
-
-
-def _save_config(cfg):
-    mw.addonManager.writeConfig(__name__, cfg)
-
-
-# ---------------------------------------------------------------------------
-# Injection markers — used to find/replace our code block in templates
-# ---------------------------------------------------------------------------
-
-_MARKER_START = "<!-- UF-START -->"
-_MARKER_END = "<!-- UF-END -->"
-
-
-# ---------------------------------------------------------------------------
-# JavaScript + CSS injected into every card
-# ---------------------------------------------------------------------------
-
-_SCRIPT_TEMPLATE = r"""
 <script>
 (function() {
-    var PITCH_ENABLED = %%PITCH_ENABLED%%;
-    var COLORS = %%COLORS%%;
-    var LINE_PX = %%LINE_PX%%;
-    var RT_FONT_SIZE = '%%RT_FONT_SIZE%%';
+    var PITCH_ENABLED = true;
+    var COLORS = {"h":"#3366CC","a":"#CC3333","n":"#DD8800","o":"#339933"};
+    var LINE_PX = 2;
+    var RT_FONT_SIZE = '0.6';
 
     // ---- Mora splitter ----
     function splitMora(kana) {
@@ -531,7 +484,7 @@ _SCRIPT_TEMPLATE = r"""
 
 <style>
 ruby { ruby-align: center; ruby-position: over; }
-ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
+ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system */
 .uf-has-info { position: relative; cursor: help; }
@@ -585,375 +538,5 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 .uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
 .uf-tt-info { color: #999; font-size: 11px; }
 </style>
-"""
-
-
-def _build_script(cfg):
-    """Build the JS/CSS payload using current config values."""
-    colors = json.dumps({
-        "h": cfg["color_heiban"],
-        "a": cfg["color_atamadaka"],
-        "n": cfg["color_nakadaka"],
-        "o": cfg["color_odaka"],
-    })
-    thickness = str(int(cfg.get("line_thickness", 2)))
-    pitch_enabled = "true" if cfg.get("pitch_accent_enabled", True) else "false"
-
-    script = _SCRIPT_TEMPLATE
-    script = script.replace("%%PITCH_ENABLED%%", pitch_enabled)
-    script = script.replace("%%COLORS%%", colors)
-    script = script.replace("%%LINE_PX%%", thickness)
-    rt_size = str(cfg.get("furigana_font_size", 0.6))
-    script = script.replace("%%RT_FONT_SIZE%%", rt_size)
-    return script
-
-
-def _build_injectable(cfg):
-    """Build the marked block for template injection."""
-    return _MARKER_START + "\n" + _build_script(cfg).strip() + "\n" + _MARKER_END
-
-
-# ---------------------------------------------------------------------------
-# Template injection helpers
-# ---------------------------------------------------------------------------
-
-def _strip_injection(html):
-    """Remove any existing UF injection from HTML."""
-    pattern = re.compile(
-        re.escape(_MARKER_START) + r".*?" + re.escape(_MARKER_END),
-        re.DOTALL
-    )
-    return pattern.sub("", html).rstrip()
-
-
-def _has_injection(html):
-    """Check if HTML already has a UF injection."""
-    return _MARKER_START in html
-
-
-def _make_key(note_name, tmpl_name, side):
-    """Create a unique key for a template side."""
-    return "%s::%s::%s" % (note_name, tmpl_name, side)
-
-
-def _inject_templates(cfg):
-    """Inject or remove script from card templates based on config."""
-    wanted = set(cfg.get("injected_templates", []))
-    block = _build_injectable(cfg)
-    col = mw.col
-    if not col:
-        return
-
-    models = col.models.all()
-    for model in models:
-        note_name = model["name"]
-        for tmpl in model["tmpls"]:
-            tmpl_name = tmpl["name"]
-            changed = False
-
-            for side, field in [("front", "qfmt"), ("back", "afmt")]:
-                key = _make_key(note_name, tmpl_name, side)
-                html = tmpl[field]
-                stripped = _strip_injection(html)
-
-                if key in wanted:
-                    # Inject (or re-inject with updated config)
-                    tmpl[field] = stripped + "\n\n" + block
-                    changed = True
-                elif _has_injection(html):
-                    # Remove injection
-                    tmpl[field] = stripped
-                    changed = True
-
-            if changed:
-                col.models.save(model)
-
-
-def _remove_all_injections():
-    """Remove UF injection from ALL templates."""
-    col = mw.col
-    if not col:
-        return
-    models = col.models.all()
-    for model in models:
-        changed = False
-        for tmpl in model["tmpls"]:
-            for field in ["qfmt", "afmt"]:
-                if _has_injection(tmpl[field]):
-                    tmpl[field] = _strip_injection(tmpl[field])
-                    changed = True
-        if changed:
-            col.models.save(model)
-
-
-# ---------------------------------------------------------------------------
-# Card hook (fallback for non-injected templates)
-# ---------------------------------------------------------------------------
-
-def on_card_will_show(text: str, card, kind: str) -> str:
-    cfg = _get_config()
-    if not cfg.get("enabled", True):
-        return text
-    # Skip injection if template already has our markers
-    if _MARKER_START in text:
-        return text
-    if '{' in text and '}' in text:
-        return text + _build_script(cfg)
-    return text
-
-
-gui_hooks.card_will_show.append(on_card_will_show)
-
-
-# ---------------------------------------------------------------------------
-# Settings dialog
-# ---------------------------------------------------------------------------
-
-class _ColorButton(QPushButton):
-    """A button that shows its color and opens a color picker on click."""
-
-    def __init__(self, color_hex, parent=None):
-        super().__init__(parent)
-        self._color = color_hex
-        self.setFixedSize(60, 28)
-        self._update_style()
-        self.clicked.connect(self._pick_color)
-
-    def _update_style(self):
-        self.setStyleSheet(
-            "background-color: %s; border: 1px solid #888; "
-            "border-radius: 4px; min-width: 50px;" % self._color
-        )
-
-    def _pick_color(self):
-        from aqt.qt import QColor
-        color = QColorDialog.getColor(
-            QColor(self._color), self.parentWidget(), "Pick Color"
-        )
-        if color.isValid():
-            self._color = color.name()
-            self._update_style()
-
-    def color(self):
-        return self._color
-
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Universal Furigana \u2014 Settings")
-        self.setMinimumWidth(560)
-        self.cfg = _get_config()
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-
-        # -- How it works --
-        info_group = QGroupBox("How It Works")
-        info_layout = QVBoxLayout(info_group)
-        info_text = QLabel(
-            "<b>Furigana</b><br>"
-            "Type <code>word{reading}</code> in any card field. "
-            "A space before the word acts as the delimiter.<br><br>"
-            "<b>Examples:</b><br>"
-            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b}</code> \u2192 reading above the word<br>"
-            "<code>\u98df\u3079\u308b{to eat}</code> \u2192 English gloss above the word<br><br>"
-            "<b>Pitch Accent (with reading)</b><br>"
-            "Add a pitch code after a semicolon:<br>"
-            "<code>\u5b66\u751f{\u304c\u304f\u305b\u3044;h}</code> \u2192 heiban (flat) \u2014 blue<br>"
-            "<code>\u79cb{\u3042\u304d;a}</code> \u2192 atamadaka (head-high) \u2014 red<br>"
-            "<code>\u5fc3{\u3053\u3053\u308d;n2}</code> \u2192 nakadaka (drop after 2nd mora) \u2014 orange<br>"
-            "<code>\u82b1{\u306f\u306a;o}</code> \u2192 odaka (tail-high, drop on particle) \u2014 green<br><br>"
-            "<b>Pitch Accent (without reading)</b><br>"
-            "Use just the pitch code \u2014 lines are drawn on the base word itself:<br>"
-            "<code>\u3077\u3063\u3064\u308a{n3}</code> \u2192 orange line with drop after 3rd mora<br>"
-            "<code>\u304c\u304f\u305b\u3044{h}</code> \u2192 blue flat line on the word<br><br>"
-            "<b>Info Tooltip (hover/tap)</b><br>"
-            "Add a description as the last segment \u2014 it shows as a \u24D8 tooltip:<br>"
-            "<code>\u6c17\u524d{\u304d\u307e\u3048;h;generosity}</code> \u2192 reading + pitch + tooltip<br>"
-            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;?;to eat}</code> \u2192 reading + tooltip (no pitch)<br>"
-            "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch-only + tooltip<br>"
-            "Hover on desktop or tap on mobile to see the description.<br>"
-            "Tap elsewhere to dismiss on mobile.<br><br>"
-            "Pitch accent shows colored lines above the furigana:<br>"
-            "\u25aa A <b>top line</b> marks high-pitch mora<br>"
-            "\u25aa A <b>vertical step</b> marks where the pitch drops<br>"
-            "\u25aa No hover needed \u2014 the pattern is always visible"
-        )
-        info_text.setWordWrap(True)
-        info_text.setTextFormat(Qt.TextFormat.RichText)
-        info_layout.addWidget(info_text)
-        layout.addWidget(info_group)
-
-        # -- Enable / Disable --
-        self.enabled_cb = QCheckBox("Enable furigana conversion")
-        self.enabled_cb.setChecked(self.cfg.get("enabled", True))
-        layout.addWidget(self.enabled_cb)
-
-        self.pitch_cb = QCheckBox("Enable pitch accent visualization")
-        self.pitch_cb.setChecked(self.cfg.get("pitch_accent_enabled", True))
-        layout.addWidget(self.pitch_cb)
-
-        # -- Color settings --
-        color_group = QGroupBox("Pitch Accent Colors")
-        color_grid = QGridLayout(color_group)
-
-        labels = [
-            ("Heiban (h) \u2014 flat:", "color_heiban"),
-            ("Atamadaka (a) \u2014 head-high:", "color_atamadaka"),
-            ("Nakadaka (nX) \u2014 mid-drop:", "color_nakadaka"),
-            ("Odaka (o) \u2014 tail-high:", "color_odaka"),
-        ]
-
-        self._color_buttons = {}
-        for row, (label_text, key) in enumerate(labels):
-            lbl = QLabel(label_text)
-            btn = _ColorButton(self.cfg.get(key, _DEFAULT_CONFIG[key]))
-            self._color_buttons[key] = btn
-            color_grid.addWidget(lbl, row, 0)
-            color_grid.addWidget(btn, row, 1)
-
-        layout.addWidget(color_group)
-
-        # -- Furigana font size --
-        font_group = QGroupBox("Furigana Font Size")
-        font_layout = QHBoxLayout(font_group)
-        font_layout.addWidget(QLabel("Size (em):"))
-        self.font_spin = QDoubleSpinBox()
-        self.font_spin.setRange(0.3, 1.5)
-        self.font_spin.setSingleStep(0.05)
-        self.font_spin.setDecimals(2)
-        self.font_spin.setValue(self.cfg.get("furigana_font_size", 0.6))
-        self.font_spin.setToolTip(
-            "Controls how large the furigana text is relative to the base text. "
-            "Smaller values = smaller furigana. Default: 0.60"
-        )
-        font_layout.addWidget(self.font_spin)
-        font_layout.addStretch()
-        layout.addWidget(font_group)
-
-        # -- Mobile compatibility: template injection --
-        mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
-        mobile_layout = QVBoxLayout(mobile_group)
-
-        mobile_info = QLabel(
-            "Check the templates below to inject the furigana script directly "
-            "into your card templates. This makes it work on <b>AnkiDroid</b> and "
-            "<b>AnkiMobile (iOS)</b> after syncing.\n\n"
-            "On desktop, the add-on works automatically on all cards even without "
-            "checking anything here."
-        )
-        mobile_info.setWordWrap(True)
-        mobile_layout.addWidget(mobile_info)
-
-        # Scrollable area for template checkboxes
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(200)
-        scroll_widget = QWidget()
-        scroll_layout = QVBoxLayout(scroll_widget)
-        scroll_layout.setContentsMargins(4, 4, 4, 4)
-
-        injected_set = set(self.cfg.get("injected_templates", []))
-        self._template_cbs = {}  # key -> QCheckBox
-
-        col = mw.col
-        if col:
-            models = col.models.all()
-            for model in sorted(models, key=lambda m: m["name"]):
-                note_name = model["name"]
-                for tmpl in model["tmpls"]:
-                    tmpl_name = tmpl["name"]
-                    for side, label in [("front", "Front"), ("back", "Back")]:
-                        key = _make_key(note_name, tmpl_name, side)
-                        display = "%s \u2192 %s \u2192 %s" % (
-                            note_name, tmpl_name, label
-                        )
-                        cb = QCheckBox(display)
-                        cb.setChecked(key in injected_set)
-                        scroll_layout.addWidget(cb)
-                        self._template_cbs[key] = cb
-
-        scroll_layout.addStretch()
-        scroll.setWidget(scroll_widget)
-        mobile_layout.addWidget(scroll)
-
-        # Select all / deselect all
-        sel_layout = QHBoxLayout()
-        sel_all_btn = QPushButton("Select All")
-        sel_all_btn.clicked.connect(self._select_all_templates)
-        desel_all_btn = QPushButton("Deselect All")
-        desel_all_btn.clicked.connect(self._deselect_all_templates)
-        sel_layout.addWidget(sel_all_btn)
-        sel_layout.addWidget(desel_all_btn)
-        sel_layout.addStretch()
-        mobile_layout.addLayout(sel_layout)
-
-        layout.addWidget(mobile_group)
-
-        # -- Buttons --
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        restore_btn = QPushButton("Restore Defaults")
-        restore_btn.clicked.connect(self._on_restore)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(self._on_save)
-
-        btn_layout.addWidget(restore_btn)
-        btn_layout.addWidget(cancel_btn)
-        btn_layout.addWidget(save_btn)
-        layout.addLayout(btn_layout)
-
-    def _select_all_templates(self):
-        for cb in self._template_cbs.values():
-            cb.setChecked(True)
-
-    def _deselect_all_templates(self):
-        for cb in self._template_cbs.values():
-            cb.setChecked(False)
-
-    def _on_save(self):
-        self.cfg["enabled"] = self.enabled_cb.isChecked()
-        self.cfg["pitch_accent_enabled"] = self.pitch_cb.isChecked()
-        self.cfg["furigana_font_size"] = round(self.font_spin.value(), 2)
-        for key, btn in self._color_buttons.items():
-            self.cfg[key] = btn.color()
-
-        # Collect checked templates
-        selected = []
-        for key, cb in self._template_cbs.items():
-            if cb.isChecked():
-                selected.append(key)
-        self.cfg["injected_templates"] = selected
-
-        _save_config(self.cfg)
-
-        # Inject/remove from templates
-        _inject_templates(self.cfg)
-
-        self.accept()
-
-    def _on_restore(self):
-        self.cfg = dict(_DEFAULT_CONFIG)
-        self.enabled_cb.setChecked(True)
-        self.pitch_cb.setChecked(True)
-        self.font_spin.setValue(_DEFAULT_CONFIG["furigana_font_size"])
-        for key, btn in self._color_buttons.items():
-            btn._color = _DEFAULT_CONFIG[key]
-            btn._update_style()
-        for cb in self._template_cbs.values():
-            cb.setChecked(False)
-
-
-def _open_settings():
-    dialog = SettingsDialog(mw)
-    dialog.exec()
-
-
-# -- Menu item --
-_action = mw.form.menuTools.addAction("Universal Furigana Settings\u2026")
-_action.triggered.connect(_open_settings)
+</body>
+</html>
