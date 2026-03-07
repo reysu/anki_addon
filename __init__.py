@@ -514,9 +514,9 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     padding: 8px 12px;
     font-size: 14px;
     line-height: 1.5;
-    width: 80vw;
-    max-width: 500px;
-    max-height: 28vh;
+    width: max-content;
+    max-width: min(75vw, 320px);
+    max-height: 30vh;
     overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     pointer-events: auto;
