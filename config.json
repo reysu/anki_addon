@@ -1,0 +1,9 @@
+{
+    "enabled": true,
+    "pitch_accent_enabled": true,
+    "color_heiban": "#3366CC",
+    "color_atamadaka": "#CC3333",
+    "color_nakadaka": "#DD8800",
+    "color_odaka": "#339933",
+    "line_thickness": 2
+}
