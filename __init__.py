@@ -440,29 +440,38 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
-    // Desktop: hover to show/hide
+    var _pinned = null; // currently pinned .uf-has-info element
+
+    // Desktop: hover to preview (only when nothing is pinned)
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) showPopup(el);
+        if (el && !_pinned) showPopup(el);
     }, true);
     document.body.addEventListener('mouseleave', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) hidePopup(el);
+        if (el && !_pinned) hidePopup(el);
     }, true);
 
-    // Desktop: click to toggle (also dismiss when clicking outside)
+    // Click to pin/unpin (desktop + mobile fallback)
     document.body.addEventListener('click', function(e) {
+        // Let nav arrows work without toggling pin
         if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
         var el = e.target.closest('.uf-has-info');
         if (el) {
-            var popup = el.querySelector('.uf-tooltip');
-            if (popup && popup.style.display === 'block') {
+            if (_pinned === el) {
+                // Clicking the same word: unpin and hide
+                _pinned = null;
                 hidePopup(el);
             } else {
+                // Pin this word open
+                if (_pinned) hidePopup(_pinned);
+                _pinned = el;
                 hideAllPopups();
                 showPopup(el);
             }
         } else {
+            // Clicked outside: unpin and hide all
+            _pinned = null;
             hideAllPopups();
         }
     });
@@ -470,6 +479,7 @@ _SCRIPT_TEMPLATE = r"""
     // Mobile: tap outside to dismiss all popups
     document.body.addEventListener('touchend', function(e) {
         if (!e.target.closest('.uf-has-info')) {
+            _pinned = null;
             hideAllPopups();
         }
     });

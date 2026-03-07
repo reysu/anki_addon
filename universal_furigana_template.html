@@ -283,26 +283,38 @@
         }
     }
 
+    var _pinned = null;
+
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) showPopup(el);
+        if (el && !_pinned) showPopup(el);
     }, true);
     document.body.addEventListener('mouseleave', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) hidePopup(el);
+        if (el && !_pinned) hidePopup(el);
     }, true);
     document.body.addEventListener('click', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el) {
-            var popup = el.querySelector('.uf-tooltip');
-            if (popup && popup.style.display === 'block') hidePopup(el);
-            else { hideAllPopups(); showPopup(el); }
+            if (_pinned === el) {
+                _pinned = null;
+                hidePopup(el);
+            } else {
+                if (_pinned) hidePopup(_pinned);
+                _pinned = el;
+                hideAllPopups();
+                showPopup(el);
+            }
         } else {
+            _pinned = null;
             hideAllPopups();
         }
     });
     document.body.addEventListener('touchend', function(e) {
-        if (!e.target.closest('.uf-has-info')) hideAllPopups();
+        if (!e.target.closest('.uf-has-info')) {
+            _pinned = null;
+            hideAllPopups();
+        }
     });
 
     function processCard() {
