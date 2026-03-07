@@ -1,28 +1,34 @@
 """
-Universal Furigana Add-on for Anki (v2)
+Universal Furigana Add-on for Anki (v5)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
+Info tooltips via hover (desktop) or tap (mobile).
 
-Works on desktop (Anki 2.1.x) and mobile (AnkiDroid / AnkiMobile).
+Works on desktop (Anki 2.1.x) via card_will_show hook.
+Works on mobile (AnkiDroid / AnkiMobile) via template injection.
 
 Syntax:
   word{reading}          -> furigana reading above word
   word{reading;h}        -> heiban pitch accent (blue, flat line)
   word{reading;a}        -> atamadaka pitch accent (red, drop after 1st)
   word{reading;nX}       -> nakadaka pitch accent (orange, drop after Xth mora)
-  word{reading;o}        -> odaka pitch accent (green, drop after last mora)
+  word{reading;o}        -> odaka pitch accent (green, drop after last)
+  word{pitch}            -> pitch-only (lines on base word, no ruby)
+  word{reading;pitch;desc} -> reading + pitch + info tooltip
+  word{pitch;desc}       -> pitch-only + info tooltip
 
 Author: Eric Su (reysu)
 """
 
 import json
 import os
+import re
 from aqt import mw, gui_hooks
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QPushButton, QColorDialog, QGroupBox, QGridLayout,
-    QFrame, Qt, QFont, QWidget
+    QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox
 )
 
 
@@ -38,6 +44,7 @@ _DEFAULT_CONFIG = {
     "color_nakadaka": "#DD8800",
     "color_odaka": "#339933",
     "line_thickness": 2,
+    "injected_templates": [],  # list of "NoteType::CardName::side" entries
 }
 
 
@@ -53,12 +60,16 @@ def _save_config(cfg):
 
 
 # ---------------------------------------------------------------------------
-# JavaScript + CSS injected into every card
+# Injection markers — used to find/replace our code block in templates
 # ---------------------------------------------------------------------------
 
-# The JS is kept as a plain string template with PLACEHOLDER markers
-# that get replaced with config values. This avoids f-string escaping hell
-# with JS regex braces.
+_MARKER_START = "<!-- UF-START -->"
+_MARKER_END = "<!-- UF-END -->"
+
+
+# ---------------------------------------------------------------------------
+# JavaScript + CSS injected into every card
+# ---------------------------------------------------------------------------
 
 _SCRIPT_TEMPLATE = r"""
 <script>
@@ -84,23 +95,18 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Pitch pattern generator ----
-    // Returns array of 0 (low) / 1 (high) per mora
     function getPitchPattern(moraCount, type, dropAt) {
         var pattern = [];
         if (type === 'h') {
-            // Heiban: L H H H H ...
             pattern.push(0);
             for (var i = 1; i < moraCount; i++) pattern.push(1);
         } else if (type === 'a') {
-            // Atamadaka: H L L L ...
             pattern.push(1);
             for (var i = 1; i < moraCount; i++) pattern.push(0);
         } else if (type === 'o') {
-            // Odaka: L H H H ... H (drop after last)
             pattern.push(0);
             for (var i = 1; i < moraCount; i++) pattern.push(1);
         } else if (type === 'n') {
-            // Nakadaka: L H H ... H L L (drop after mora #dropAt)
             pattern.push(0);
             for (var i = 1; i < moraCount; i++) {
                 pattern.push(i < dropAt ? 1 : 0);
@@ -110,12 +116,6 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Build pitch HTML ----
-    // Draws a clean horizontal line above high-pitch mora.
-    // Only a single vertical drop line where pitch falls — no boxes.
-    //   heiban:    flat line across all mora (no verticals)
-    //   atamadaka: line on 1st mora, drop-line on its right
-    //   nakadaka:  line from 2nd mora to drop point, drop-line there
-    //   odaka:     flat line across all mora, drop-line after last
     function buildPitchHTML(reading, type, dropAt, color) {
         var mora = splitMora(reading);
         var moraCount = mora.length;
@@ -128,14 +128,11 @@ _SCRIPT_TEMPLATE = r"""
 
             var bTop = isHigh ? (LINE_PX + 'px solid ' + color) : 'none';
 
-            // Check if this mora is the drop point
             var hasDrop = false;
             if (type === 'a' && i === 0) hasDrop = true;
             else if (type === 'n' && isHigh && nextLow) hasDrop = true;
             else if (type === 'o' && i === mora.length - 1) hasDrop = true;
 
-            // Use position:relative on the mora span so we can place
-            // a half-height drop line via an inner absolute span
             var style = 'display:inline-block;position:relative;'
                 + 'padding-top:' + (LINE_PX + 2) + 'px;'
                 + 'border-top:' + bTop + ';'
@@ -145,9 +142,6 @@ _SCRIPT_TEMPLATE = r"""
             html += '<span style="' + style + '">' + mora[i];
 
             if (hasDrop) {
-                // Small absolute-positioned span on the right edge,
-                // 50% tall. Starts from -LINE_PX so it overlaps with
-                // the border-top and connects seamlessly at the corner.
                 html += '<span style="position:absolute;right:0;top:-' + LINE_PX + 'px;'
                     + 'width:' + LINE_PX + 'px;height:40%;'
                     + 'background:' + color + ';"></span>';
@@ -160,7 +154,6 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Pitch code detector ----
-    // Returns pitch object if str is a valid pitch code, else null
     function parsePitchCode(str) {
         if (!PITCH_ENABLED || !str) return null;
         var code = str.trim().toLowerCase();
@@ -177,33 +170,20 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Parse annotation ----
-    // Supports:
-    //   "たべる"              -> reading only
-    //   "たべる;h"            -> reading + pitch
-    //   "きまえ;h;generosity"  -> reading + pitch + info tooltip
-    //   "たべる;;to eat"       -> reading + info tooltip (no pitch)
-    //   "h"                  -> pitch only (no reading, lines on base word)
-    //   "n3"                 -> pitch only
-    //   "n3;snapping"        -> pitch only + info tooltip
     function parseAnnotation(annotation, baseWord) {
         var parts = annotation.split(';');
         var reading = null;
         var pitch = null;
         var gloss = null;
 
-        // Check if the first segment is itself a pitch code
-        // e.g. {h}, {n3}, {n3;gloss}
         var firstAsPitch = parsePitchCode(parts[0]);
 
         if (firstAsPitch) {
-            // Pitch-only mode: no reading, lines drawn on base word
             pitch = firstAsPitch;
-            // Second segment (if any) is the gloss
             if (parts.length > 1 && parts[1].trim().length > 0) {
                 gloss = parts[1].trim();
             }
         } else {
-            // Normal mode: first segment is reading
             reading = parts[0];
             if (parts.length > 1) {
                 pitch = parsePitchCode(parts[1]);
@@ -247,7 +227,7 @@ _SCRIPT_TEMPLATE = r"""
 
             var RE = /([^\s{]+?)\{([^}]+)\}/g;
             if (!RE.test(text)) continue;
-            RE.lastIndex = 0;  // reset after .test()
+            RE.lastIndex = 0;
 
             var parts = [];
             var lastIdx = 0;
@@ -274,7 +254,6 @@ _SCRIPT_TEMPLATE = r"""
                 } else {
                     var parsed = parseAnnotation(part.ann, part.base);
 
-                    // --- Pitch-only (no reading): lines go on base word directly ---
                     if (!parsed.reading && parsed.pitch) {
                         var container = document.createElement('span');
                         container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
@@ -284,7 +263,6 @@ _SCRIPT_TEMPLATE = r"""
                         }
                         frag.appendChild(container);
 
-                    // --- Has reading: use ruby with optional pitch ---
                     } else {
                         var rtContent = '';
 
@@ -311,18 +289,15 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Tooltip helper ----
-    // Wraps an element with an info indicator + hover/tap tooltip
     function wrapWithTooltip(el, text) {
         el.classList.add('uf-has-info');
         el.setAttribute('data-uf-info', text);
-        // Add the tiny info dot indicator
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
-        dot.textContent = '\u24D8';  // circled i
+        dot.textContent = '\u24D8';
         el.appendChild(dot);
     }
 
-    // ---- Tooltip show/hide (single shared tooltip element) ----
     var tooltip = null;
     function getTooltip() {
         if (!tooltip) {
@@ -339,7 +314,6 @@ _SCRIPT_TEMPLATE = r"""
         var tt = getTooltip();
         tt.textContent = text;
         tt.style.display = 'block';
-        // Position above the element
         var rect = el.getBoundingClientRect();
         var ttRect;
         tt.style.left = '0px';
@@ -347,10 +321,9 @@ _SCRIPT_TEMPLATE = r"""
         ttRect = tt.getBoundingClientRect();
         var left = rect.left + (rect.width / 2) - (ttRect.width / 2);
         var top = rect.top - ttRect.height - 6;
-        // Keep within viewport
         if (left < 4) left = 4;
         if (left + ttRect.width > window.innerWidth - 4) left = window.innerWidth - ttRect.width - 4;
-        if (top < 4) top = rect.bottom + 6;  // flip below if no room above
+        if (top < 4) top = rect.bottom + 6;
         tt.style.left = left + window.scrollX + 'px';
         tt.style.top = top + window.scrollY + 'px';
     }
@@ -359,7 +332,6 @@ _SCRIPT_TEMPLATE = r"""
         if (tooltip) tooltip.style.display = 'none';
     }
 
-    // Attach listeners via event delegation on body
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el) showTooltip(el);
@@ -368,7 +340,6 @@ _SCRIPT_TEMPLATE = r"""
         var el = e.target.closest('.uf-has-info');
         if (el) hideTooltip();
     }, true);
-    // Mobile: tap to toggle
     document.body.addEventListener('click', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el) {
@@ -480,13 +451,94 @@ def _build_script(cfg):
     return script
 
 
+def _build_injectable(cfg):
+    """Build the marked block for template injection."""
+    return _MARKER_START + "\n" + _build_script(cfg).strip() + "\n" + _MARKER_END
+
+
 # ---------------------------------------------------------------------------
-# Card hook
+# Template injection helpers
+# ---------------------------------------------------------------------------
+
+def _strip_injection(html):
+    """Remove any existing UF injection from HTML."""
+    pattern = re.compile(
+        re.escape(_MARKER_START) + r".*?" + re.escape(_MARKER_END),
+        re.DOTALL
+    )
+    return pattern.sub("", html).rstrip()
+
+
+def _has_injection(html):
+    """Check if HTML already has a UF injection."""
+    return _MARKER_START in html
+
+
+def _make_key(note_name, tmpl_name, side):
+    """Create a unique key for a template side."""
+    return "%s::%s::%s" % (note_name, tmpl_name, side)
+
+
+def _inject_templates(cfg):
+    """Inject or remove script from card templates based on config."""
+    wanted = set(cfg.get("injected_templates", []))
+    block = _build_injectable(cfg)
+    col = mw.col
+    if not col:
+        return
+
+    models = col.models.all()
+    for model in models:
+        note_name = model["name"]
+        for tmpl in model["tmpls"]:
+            tmpl_name = tmpl["name"]
+            changed = False
+
+            for side, field in [("front", "qfmt"), ("back", "afmt")]:
+                key = _make_key(note_name, tmpl_name, side)
+                html = tmpl[field]
+                stripped = _strip_injection(html)
+
+                if key in wanted:
+                    # Inject (or re-inject with updated config)
+                    tmpl[field] = stripped + "\n\n" + block
+                    changed = True
+                elif _has_injection(html):
+                    # Remove injection
+                    tmpl[field] = stripped
+                    changed = True
+
+            if changed:
+                col.models.save(model)
+
+
+def _remove_all_injections():
+    """Remove UF injection from ALL templates."""
+    col = mw.col
+    if not col:
+        return
+    models = col.models.all()
+    for model in models:
+        changed = False
+        for tmpl in model["tmpls"]:
+            for field in ["qfmt", "afmt"]:
+                if _has_injection(tmpl[field]):
+                    tmpl[field] = _strip_injection(tmpl[field])
+                    changed = True
+        if changed:
+            col.models.save(model)
+
+
+# ---------------------------------------------------------------------------
+# Card hook (fallback for non-injected templates)
 # ---------------------------------------------------------------------------
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     cfg = _get_config()
     if not cfg.get("enabled", True):
+        return text
+    # Skip injection if template already has our markers
+    if _MARKER_START in text:
         return text
     if '{' in text and '}' in text:
         return text + _build_script(cfg)
@@ -533,7 +585,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Universal Furigana \u2014 Settings")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self.cfg = _get_config()
         self._setup_ui()
 
@@ -607,6 +659,65 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(color_group)
 
+        # -- Mobile compatibility: template injection --
+        mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
+        mobile_layout = QVBoxLayout(mobile_group)
+
+        mobile_info = QLabel(
+            "Check the templates below to inject the furigana script directly "
+            "into your card templates. This makes it work on <b>AnkiDroid</b> and "
+            "<b>AnkiMobile (iOS)</b> after syncing.\n\n"
+            "On desktop, the add-on works automatically on all cards even without "
+            "checking anything here."
+        )
+        mobile_info.setWordWrap(True)
+        mobile_layout.addWidget(mobile_info)
+
+        # Scrollable area for template checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(200)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(4, 4, 4, 4)
+
+        injected_set = set(self.cfg.get("injected_templates", []))
+        self._template_cbs = {}  # key -> QCheckBox
+
+        col = mw.col
+        if col:
+            models = col.models.all()
+            for model in sorted(models, key=lambda m: m["name"]):
+                note_name = model["name"]
+                for tmpl in model["tmpls"]:
+                    tmpl_name = tmpl["name"]
+                    for side, label in [("front", "Front"), ("back", "Back")]:
+                        key = _make_key(note_name, tmpl_name, side)
+                        display = "%s \u2192 %s \u2192 %s" % (
+                            note_name, tmpl_name, label
+                        )
+                        cb = QCheckBox(display)
+                        cb.setChecked(key in injected_set)
+                        scroll_layout.addWidget(cb)
+                        self._template_cbs[key] = cb
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        mobile_layout.addWidget(scroll)
+
+        # Select all / deselect all
+        sel_layout = QHBoxLayout()
+        sel_all_btn = QPushButton("Select All")
+        sel_all_btn.clicked.connect(self._select_all_templates)
+        desel_all_btn = QPushButton("Deselect All")
+        desel_all_btn.clicked.connect(self._deselect_all_templates)
+        sel_layout.addWidget(sel_all_btn)
+        sel_layout.addWidget(desel_all_btn)
+        sel_layout.addStretch()
+        mobile_layout.addLayout(sel_layout)
+
+        layout.addWidget(mobile_group)
+
         # -- Buttons --
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -623,12 +734,32 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
 
+    def _select_all_templates(self):
+        for cb in self._template_cbs.values():
+            cb.setChecked(True)
+
+    def _deselect_all_templates(self):
+        for cb in self._template_cbs.values():
+            cb.setChecked(False)
+
     def _on_save(self):
         self.cfg["enabled"] = self.enabled_cb.isChecked()
         self.cfg["pitch_accent_enabled"] = self.pitch_cb.isChecked()
         for key, btn in self._color_buttons.items():
             self.cfg[key] = btn.color()
+
+        # Collect checked templates
+        selected = []
+        for key, cb in self._template_cbs.items():
+            if cb.isChecked():
+                selected.append(key)
+        self.cfg["injected_templates"] = selected
+
         _save_config(self.cfg)
+
+        # Inject/remove from templates
+        _inject_templates(self.cfg)
+
         self.accept()
 
     def _on_restore(self):
@@ -638,6 +769,8 @@ class SettingsDialog(QDialog):
         for key, btn in self._color_buttons.items():
             btn._color = _DEFAULT_CONFIG[key]
             btn._update_style()
+        for cb in self._template_cbs.values():
+            cb.setChecked(False)
 
 
 def _open_settings():
