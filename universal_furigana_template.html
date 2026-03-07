@@ -196,8 +196,14 @@
                         }
                         var ruby = document.createElement('ruby');
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
-                        if (parsed.gloss) wrapWithTooltip(ruby, parsed.gloss);
-                        frag.appendChild(ruby);
+                        if (parsed.gloss) {
+                            var wrapper = document.createElement('span');
+                            wrapper.appendChild(ruby);
+                            wrapWithTooltip(wrapper, parsed.gloss);
+                            frag.appendChild(wrapper);
+                        } else {
+                            frag.appendChild(ruby);
+                        }
                     }
                 }
             }
@@ -215,6 +221,14 @@
         popup.className = 'uf-tooltip';
         popup.textContent = text;
         el.appendChild(popup);
+        // Direct touch handler for mobile
+        el.addEventListener('touchend', function(ev) {
+            ev.preventDefault();
+            var p = this.querySelector('.uf-tooltip');
+            if (!p) return;
+            if (p.style.display === 'block') { hidePopup(this); }
+            else { hideAllPopups(); showPopup(this); }
+        });
     }
 
     function showPopup(el) {
@@ -286,6 +300,9 @@
         } else {
             hideAllPopups();
         }
+    });
+    document.body.addEventListener('touchend', function(e) {
+        if (!e.target.closest('.uf-has-info')) hideAllPopups();
     });
 
     function processCard() {

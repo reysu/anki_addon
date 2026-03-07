@@ -280,10 +280,14 @@ _SCRIPT_TEMPLATE = r"""
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
 
                         if (parsed.gloss) {
-                            wrapWithTooltip(ruby, parsed.gloss);
+                            // Wrap ruby in a span so tooltip escapes ruby overflow
+                            var wrapper = document.createElement('span');
+                            wrapper.appendChild(ruby);
+                            wrapWithTooltip(wrapper, parsed.gloss);
+                            frag.appendChild(wrapper);
+                        } else {
+                            frag.appendChild(ruby);
                         }
-
-                        frag.appendChild(ruby);
                     }
                 }
             }
@@ -323,6 +327,10 @@ _SCRIPT_TEMPLATE = r"""
             var next = document.createElement('span');
             next.className = 'uf-tt-next';
             next.textContent = '\u25B6';
+            prev.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, -1); });
+            prev.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, -1); });
+            next.addEventListener('touchend', function(ev) { ev.stopPropagation(); ev.preventDefault(); ufNavPage(popup, 1); });
+            next.addEventListener('click', function(ev) { ev.stopPropagation(); ufNavPage(popup, 1); });
             nav.appendChild(prev);
             nav.appendChild(info);
             nav.appendChild(next);
@@ -330,6 +338,29 @@ _SCRIPT_TEMPLATE = r"""
         }
 
         el.appendChild(popup);
+
+        // Direct touch handler for mobile (like Migaku ontouchend)
+        el.addEventListener('touchend', function(ev) {
+            ev.preventDefault();
+            var p = this.querySelector('.uf-tooltip');
+            if (!p) return;
+            if (p.style.display === 'block') {
+                hidePopup(this);
+            } else {
+                hideAllPopups();
+                showPopup(this);
+            }
+        });
+    }
+
+    function ufNavPage(popup, dir) {
+        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var idx = parseInt(popup.getAttribute('data-page'), 10);
+        idx += dir;
+        if (idx < 0) idx = 0;
+        if (idx >= pages.length) idx = pages.length - 1;
+        popup.setAttribute('data-page', idx);
+        renderPage(popup);
     }
 
     function paginate(text) {
@@ -409,6 +440,7 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
+    // Desktop: hover to show/hide
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el) showPopup(el);
@@ -417,19 +449,10 @@ _SCRIPT_TEMPLATE = r"""
         var el = e.target.closest('.uf-has-info');
         if (el) hidePopup(el);
     }, true);
+
+    // Desktop: click to toggle (also dismiss when clicking outside)
     document.body.addEventListener('click', function(e) {
-        var nav = e.target.closest('.uf-tt-prev, .uf-tt-next');
-        if (nav) {
-            var popup = nav.closest('.uf-tooltip');
-            var pages = JSON.parse(popup.getAttribute('data-pages'));
-            var idx = parseInt(popup.getAttribute('data-page'), 10);
-            if (nav.classList.contains('uf-tt-prev') && idx > 0) idx--;
-            if (nav.classList.contains('uf-tt-next') && idx < pages.length - 1) idx++;
-            popup.setAttribute('data-page', idx);
-            renderPage(popup);
-            e.stopPropagation();
-            return;
-        }
+        if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
         var el = e.target.closest('.uf-has-info');
         if (el) {
             var popup = el.querySelector('.uf-tooltip');
@@ -440,6 +463,13 @@ _SCRIPT_TEMPLATE = r"""
                 showPopup(el);
             }
         } else {
+            hideAllPopups();
+        }
+    });
+
+    // Mobile: tap outside to dismiss all popups
+    document.body.addEventListener('touchend', function(e) {
+        if (!e.target.closest('.uf-has-info')) {
             hideAllPopups();
         }
     });
