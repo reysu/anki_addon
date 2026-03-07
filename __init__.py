@@ -291,68 +291,77 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
-    // ---- Tooltip helper ----
+    // ---- Tooltip helper (Migaku-style: popup is a child of the word) ----
     function wrapWithTooltip(el, text) {
         el.classList.add('uf-has-info');
-        el.setAttribute('data-uf-info', text);
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
         dot.textContent = '\u24D8';
         el.appendChild(dot);
+        var popup = document.createElement('div');
+        popup.className = 'uf-tooltip';
+        popup.textContent = text;
+        el.appendChild(popup);
     }
 
-    var tooltip = null;
-    function getTooltip() {
-        if (!tooltip) {
-            tooltip = document.createElement('div');
-            tooltip.className = 'uf-tooltip';
-            document.body.appendChild(tooltip);
+    function showPopup(el) {
+        var popup = el.querySelector('.uf-tooltip');
+        if (!popup) return;
+        popup.style.display = 'block';
+        popup.style.position = 'absolute';
+        popup.style.left = '2px';
+        popup.style.top = el.offsetHeight + 'px';
+        var pRect = popup.getBoundingClientRect();
+        var card = el.closest('.card') || document.body;
+        var cardRect = card.getBoundingClientRect();
+        var rightEdge = pRect.left + pRect.width;
+        var limit = cardRect.left + cardRect.width;
+        if (rightEdge > limit) {
+            popup.style.left = '-' + (rightEdge - limit + 2) + 'px';
         }
-        return tooltip;
+        if (pRect.top + pRect.height > window.innerHeight) {
+            popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
+        }
     }
 
-    function showTooltip(el) {
-        var text = el.getAttribute('data-uf-info');
-        if (!text) return;
-        var tt = getTooltip();
-        tt.textContent = text;
-        tt.style.display = 'block';
-        var rect = el.getBoundingClientRect();
-        var ttRect;
-        tt.style.left = '0px';
-        tt.style.top = '0px';
-        ttRect = tt.getBoundingClientRect();
-        var left = rect.left + (rect.width / 2) - (ttRect.width / 2);
-        var top = rect.top - ttRect.height - 6;
-        if (left < 4) left = 4;
-        if (left + ttRect.width > window.innerWidth - 4) left = window.innerWidth - ttRect.width - 4;
-        if (top < 4) top = rect.bottom + 6;
-        tt.style.left = left + 'px';
-        tt.style.top = top + 'px';
+    function hidePopup(el) {
+        var popup = el.querySelector('.uf-tooltip');
+        if (popup) {
+            popup.style.display = 'none';
+            popup.style.left = '';
+            popup.style.top = '';
+        }
     }
 
-    function hideTooltip() {
-        if (tooltip) tooltip.style.display = 'none';
+    function hideAllPopups() {
+        var popups = document.getElementsByClassName('uf-tooltip');
+        for (var i = 0; i < popups.length; i++) {
+            popups[i].style.display = 'none';
+            popups[i].style.left = '';
+            popups[i].style.top = '';
+        }
     }
 
     document.body.addEventListener('mouseenter', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) showTooltip(el);
+        if (el) showPopup(el);
     }, true);
     document.body.addEventListener('mouseleave', function(e) {
         var el = e.target.closest('.uf-has-info');
-        if (el) hideTooltip();
+        if (el) hidePopup(el);
     }, true);
     document.body.addEventListener('click', function(e) {
         var el = e.target.closest('.uf-has-info');
         if (el) {
-            if (tooltip && tooltip.style.display === 'block') {
-                hideTooltip();
+            var popup = el.querySelector('.uf-tooltip');
+            if (popup && popup.style.display === 'block') {
+                hidePopup(el);
             } else {
-                showTooltip(el);
+                hideAllPopups();
+                showPopup(el);
             }
         } else {
-            hideTooltip();
+            hideAllPopups();
         }
     });
 
@@ -417,7 +426,7 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 }
 .uf-tooltip {
     display: none;
-    position: fixed;
+    position: absolute;
     z-index: 99999;
     background: #2a2a3e;
     color: #ddd;
