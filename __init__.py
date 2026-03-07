@@ -309,18 +309,33 @@ _SCRIPT_TEMPLATE = r"""
         if (!popup) return;
         popup.style.display = 'block';
         popup.style.position = 'absolute';
-        popup.style.left = '2px';
+        popup.style.left = '0px';
         popup.style.top = el.offsetHeight + 'px';
+        popup.style.maxHeight = '';
+        popup.style.overflowY = '';
         var pRect = popup.getBoundingClientRect();
         var card = el.closest('.card') || document.body;
         var cardRect = card.getBoundingClientRect();
         var rightEdge = pRect.left + pRect.width;
         var limit = cardRect.left + cardRect.width;
         if (rightEdge > limit) {
-            popup.style.left = '-' + (rightEdge - limit + 2) + 'px';
+            popup.style.left = '-' + (rightEdge - limit + 4) + 'px';
         }
-        if (pRect.top + pRect.height > window.innerHeight) {
+        if (pRect.left < 4) popup.style.left = (4 - el.getBoundingClientRect().left) + 'px';
+        pRect = popup.getBoundingClientRect();
+        var spaceBelow = window.innerHeight - pRect.top;
+        var spaceAbove = el.getBoundingClientRect().top;
+        if (pRect.height <= spaceBelow) {
+            // fits below, do nothing
+        } else if (pRect.height <= spaceAbove) {
             popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
+        } else {
+            var usable = Math.max(spaceBelow, spaceAbove);
+            if (spaceAbove > spaceBelow) {
+                popup.style.top = '-' + (Math.min(popup.offsetHeight, usable) + 3) + 'px';
+            }
+            popup.style.maxHeight = (usable - 10) + 'px';
+            popup.style.overflowY = 'auto';
         }
     }
 
@@ -435,7 +450,7 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     padding: 6px 10px;
     font-size: 14px;
     line-height: 1.4;
-    max-width: 300px;
+    max-width: min(80vw, 450px);
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     pointer-events: none;
     white-space: normal;
