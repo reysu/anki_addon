@@ -159,24 +159,61 @@ _SCRIPT_TEMPLATE = r"""
         return html;
     }
 
-    // ---- Parse annotation ----
-    function parseAnnotation(annotation) {
-        var parts = annotation.split(';');
-        var reading = parts[0];
-        var pitch = null;
-
-        if (PITCH_ENABLED && parts.length > 1) {
-            var code = parts[1].trim().toLowerCase();
-            if (code === 'h' || code === 'a' || code === 'o') {
-                pitch = { type: code, drop: 0, color: COLORS[code] };
-            } else if (code.charAt(0) === 'n' && code.length > 1) {
-                var drop = parseInt(code.substring(1), 10);
-                if (!isNaN(drop)) {
-                    pitch = { type: 'n', drop: drop, color: COLORS['n'] };
-                }
+    // ---- Pitch code detector ----
+    // Returns pitch object if str is a valid pitch code, else null
+    function parsePitchCode(str) {
+        if (!PITCH_ENABLED || !str) return null;
+        var code = str.trim().toLowerCase();
+        if (code === 'h' || code === 'a' || code === 'o') {
+            return { type: code, drop: 0, color: COLORS[code] };
+        }
+        if (code.charAt(0) === 'n' && code.length > 1) {
+            var drop = parseInt(code.substring(1), 10);
+            if (!isNaN(drop) && drop > 0) {
+                return { type: 'n', drop: drop, color: COLORS['n'] };
             }
         }
-        return { reading: reading, pitch: pitch };
+        return null;
+    }
+
+    // ---- Parse annotation ----
+    // Supports:
+    //   "たべる"              -> reading only
+    //   "たべる;h"            -> reading + pitch
+    //   "きまえ;h;generosity"  -> reading + pitch + gloss
+    //   "たべる;;to eat"       -> reading + gloss (no pitch)
+    //   "h"                  -> pitch only (no reading, lines on base word)
+    //   "n3"                 -> pitch only
+    //   "n3;snapping"        -> pitch only + gloss
+    function parseAnnotation(annotation, baseWord) {
+        var parts = annotation.split(';');
+        var reading = null;
+        var pitch = null;
+        var gloss = null;
+
+        // Check if the first segment is itself a pitch code
+        // e.g. {h}, {n3}, {n3;gloss}
+        var firstAsPitch = parsePitchCode(parts[0]);
+
+        if (firstAsPitch) {
+            // Pitch-only mode: no reading, lines drawn on base word
+            pitch = firstAsPitch;
+            // Second segment (if any) is the gloss
+            if (parts.length > 1 && parts[1].trim().length > 0) {
+                gloss = parts[1].trim();
+            }
+        } else {
+            // Normal mode: first segment is reading
+            reading = parts[0];
+            if (parts.length > 1) {
+                pitch = parsePitchCode(parts[1]);
+            }
+            if (parts.length > 2 && parts[2].trim().length > 0) {
+                gloss = parts[2].trim();
+            }
+        }
+
+        return { reading: reading, pitch: pitch, gloss: gloss };
     }
 
     // ---- Main conversion ----
@@ -235,20 +272,54 @@ _SCRIPT_TEMPLATE = r"""
                 if (part.t === 'txt') {
                     frag.appendChild(document.createTextNode(part.v));
                 } else {
-                    var parsed = parseAnnotation(part.ann);
-                    if (parsed.pitch) {
-                        var wrapper = document.createElement('ruby');
-                        wrapper.innerHTML = part.base + '<rt>' +
-                            buildPitchHTML(parsed.reading, parsed.pitch.type,
-                                          parsed.pitch.drop, parsed.pitch.color) +
-                            '</rt>';
-                        frag.appendChild(wrapper);
+                    var parsed = parseAnnotation(part.ann, part.base);
+
+                    // --- Pitch-only (no reading): lines go on base word directly ---
+                    if (!parsed.reading && parsed.pitch) {
+                        var container = document.createElement('span');
+                        var inner = '';
+                        if (parsed.gloss) {
+                            // Use ruby to stack gloss above the pitch-lined base
+                            inner += '<ruby>';
+                            inner += buildPitchHTML(part.base, parsed.pitch.type,
+                                                   parsed.pitch.drop, parsed.pitch.color);
+                            inner += '<rt><span class="uf-gloss" style="'
+                                + 'font-size:0.7em;opacity:0.6;line-height:1;'
+                                + 'white-space:nowrap;">' + parsed.gloss + '</span></rt>';
+                            inner += '</ruby>';
+                        } else {
+                            inner = buildPitchHTML(part.base, parsed.pitch.type,
+                                                  parsed.pitch.drop, parsed.pitch.color);
+                        }
+                        container.innerHTML = inner;
+                        frag.appendChild(container);
+
+                    // --- Has reading: use ruby with optional gloss + pitch ---
                     } else {
+                        var rtContent = '';
+
+                        if (parsed.gloss) {
+                            rtContent += '<span style="display:inline-flex;flex-direction:column;'
+                                + 'align-items:center;gap:1px;line-height:1.1;'
+                                + 'vertical-align:bottom;">';
+                            rtContent += '<span class="uf-gloss" style="'
+                                + 'font-size:0.65em;opacity:0.6;line-height:1;'
+                                + 'white-space:nowrap;display:block;">' + parsed.gloss + '</span>';
+                        }
+
+                        if (parsed.pitch && parsed.reading) {
+                            rtContent += buildPitchHTML(parsed.reading, parsed.pitch.type,
+                                                       parsed.pitch.drop, parsed.pitch.color);
+                        } else if (parsed.reading) {
+                            rtContent += '<span>' + parsed.reading + '</span>';
+                        }
+
+                        if (parsed.gloss) {
+                            rtContent += '</span>';
+                        }
+
                         var ruby = document.createElement('ruby');
-                        ruby.textContent = part.base;
-                        var rt = document.createElement('rt');
-                        rt.textContent = parsed.reading;
-                        ruby.appendChild(rt);
+                        ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
                         frag.appendChild(ruby);
                     }
                 }
@@ -300,8 +371,9 @@ _SCRIPT_TEMPLATE = r"""
 </script>
 
 <style>
-ruby { ruby-align: center; }
-ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; }
+ruby { ruby-align: center; ruby-position: over; }
+ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
+ruby rt > span[style*="flex-direction"] { margin-bottom: 2px; }
 .uf-pitch-word span { font-size: 1em; }
 </style>
 """
@@ -395,12 +467,24 @@ class SettingsDialog(QDialog):
             "<b>Examples:</b><br>"
             "<code>\u98df\u3079\u308b{\u305f\u3079\u308b}</code> \u2192 reading above the word<br>"
             "<code>\u98df\u3079\u308b{to eat}</code> \u2192 English gloss above the word<br><br>"
-            "<b>Pitch Accent</b><br>"
+            "<b>Pitch Accent (with reading)</b><br>"
             "Add a pitch code after a semicolon:<br>"
             "<code>\u5b66\u751f{\u304c\u304f\u305b\u3044;h}</code> \u2192 heiban (flat) \u2014 blue<br>"
             "<code>\u79cb{\u3042\u304d;a}</code> \u2192 atamadaka (head-high) \u2014 red<br>"
             "<code>\u5fc3{\u3053\u3053\u308d;n2}</code> \u2192 nakadaka (drop after 2nd mora) \u2014 orange<br>"
             "<code>\u82b1{\u306f\u306a;o}</code> \u2192 odaka (tail-high, drop on particle) \u2014 green<br><br>"
+            "<b>Pitch Accent (without reading)</b><br>"
+            "Use just the pitch code \u2014 lines are drawn on the base word itself:<br>"
+            "<code>\u3077\u3063\u3064\u308a{n3}</code> \u2192 orange line with drop after 3rd mora<br>"
+            "<code>\u304c\u304f\u305b\u3044{h}</code> \u2192 blue flat line on the word<br>"
+            "Add an English gloss after the pitch code:<br>"
+            "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch line + \u201csnapping\u201d above<br><br>"
+            "<b>Reading + Pitch + English (triple)</b><br>"
+            "Add a third semicolon segment for an English meaning:<br>"
+            "<code>\u6c17\u524d{\u304d\u307e\u3048;h;generosity}</code><br>"
+            "\u2192 Shows: <i>generosity</i> (tiny) on top, then pitch-accented \u304d\u307e\u3048, then \u6c17\u524d<br>"
+            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;;to eat}</code><br>"
+            "\u2192 Gloss without pitch (leave pitch code empty)<br><br>"
             "Pitch accent shows colored lines above the furigana:<br>"
             "\u25aa A <b>top line</b> marks high-pitch mora<br>"
             "\u25aa A <b>vertical step</b> marks where the pitch drops<br>"
