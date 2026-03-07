@@ -180,11 +180,11 @@ _SCRIPT_TEMPLATE = r"""
     // Supports:
     //   "たべる"              -> reading only
     //   "たべる;h"            -> reading + pitch
-    //   "きまえ;h;generosity"  -> reading + pitch + gloss
-    //   "たべる;;to eat"       -> reading + gloss (no pitch)
+    //   "きまえ;h;generosity"  -> reading + pitch + info tooltip
+    //   "たべる;;to eat"       -> reading + info tooltip (no pitch)
     //   "h"                  -> pitch only (no reading, lines on base word)
     //   "n3"                 -> pitch only
-    //   "n3;snapping"        -> pitch only + gloss
+    //   "n3;snapping"        -> pitch only + info tooltip
     function parseAnnotation(annotation, baseWord) {
         var parts = annotation.split(';');
         var reading = null;
@@ -277,35 +277,16 @@ _SCRIPT_TEMPLATE = r"""
                     // --- Pitch-only (no reading): lines go on base word directly ---
                     if (!parsed.reading && parsed.pitch) {
                         var container = document.createElement('span');
-                        var inner = '';
+                        container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
+                                                            parsed.pitch.drop, parsed.pitch.color);
                         if (parsed.gloss) {
-                            // Use ruby to stack gloss above the pitch-lined base
-                            inner += '<ruby>';
-                            inner += buildPitchHTML(part.base, parsed.pitch.type,
-                                                   parsed.pitch.drop, parsed.pitch.color);
-                            inner += '<rt><span class="uf-gloss" style="'
-                                + 'font-size:0.7em;opacity:0.6;line-height:1;'
-                                + 'white-space:nowrap;">' + parsed.gloss + '</span></rt>';
-                            inner += '</ruby>';
-                        } else {
-                            inner = buildPitchHTML(part.base, parsed.pitch.type,
-                                                  parsed.pitch.drop, parsed.pitch.color);
+                            wrapWithTooltip(container, parsed.gloss);
                         }
-                        container.innerHTML = inner;
                         frag.appendChild(container);
 
-                    // --- Has reading: use ruby with optional gloss + pitch ---
+                    // --- Has reading: use ruby with optional pitch ---
                     } else {
                         var rtContent = '';
-
-                        if (parsed.gloss) {
-                            rtContent += '<span style="display:inline-flex;flex-direction:column;'
-                                + 'align-items:center;gap:1px;line-height:1.1;'
-                                + 'vertical-align:bottom;">';
-                            rtContent += '<span class="uf-gloss" style="'
-                                + 'font-size:0.65em;opacity:0.6;line-height:1;'
-                                + 'white-space:nowrap;display:block;">' + parsed.gloss + '</span>';
-                        }
 
                         if (parsed.pitch && parsed.reading) {
                             rtContent += buildPitchHTML(parsed.reading, parsed.pitch.type,
@@ -314,12 +295,13 @@ _SCRIPT_TEMPLATE = r"""
                             rtContent += '<span>' + parsed.reading + '</span>';
                         }
 
-                        if (parsed.gloss) {
-                            rtContent += '</span>';
-                        }
-
                         var ruby = document.createElement('ruby');
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
+
+                        if (parsed.gloss) {
+                            wrapWithTooltip(ruby, parsed.gloss);
+                        }
+
                         frag.appendChild(ruby);
                     }
                 }
@@ -327,6 +309,78 @@ _SCRIPT_TEMPLATE = r"""
             textNode.parentNode.replaceChild(frag, textNode);
         }
     }
+
+    // ---- Tooltip helper ----
+    // Wraps an element with an info indicator + hover/tap tooltip
+    function wrapWithTooltip(el, text) {
+        el.classList.add('uf-has-info');
+        el.setAttribute('data-uf-info', text);
+        // Add the tiny info dot indicator
+        var dot = document.createElement('span');
+        dot.className = 'uf-info-dot';
+        dot.textContent = '\u24D8';  // circled i
+        el.appendChild(dot);
+    }
+
+    // ---- Tooltip show/hide (single shared tooltip element) ----
+    var tooltip = null;
+    function getTooltip() {
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.className = 'uf-tooltip';
+            document.body.appendChild(tooltip);
+        }
+        return tooltip;
+    }
+
+    function showTooltip(el) {
+        var text = el.getAttribute('data-uf-info');
+        if (!text) return;
+        var tt = getTooltip();
+        tt.textContent = text;
+        tt.style.display = 'block';
+        // Position above the element
+        var rect = el.getBoundingClientRect();
+        var ttRect;
+        tt.style.left = '0px';
+        tt.style.top = '0px';
+        ttRect = tt.getBoundingClientRect();
+        var left = rect.left + (rect.width / 2) - (ttRect.width / 2);
+        var top = rect.top - ttRect.height - 6;
+        // Keep within viewport
+        if (left < 4) left = 4;
+        if (left + ttRect.width > window.innerWidth - 4) left = window.innerWidth - ttRect.width - 4;
+        if (top < 4) top = rect.bottom + 6;  // flip below if no room above
+        tt.style.left = left + window.scrollX + 'px';
+        tt.style.top = top + window.scrollY + 'px';
+    }
+
+    function hideTooltip() {
+        if (tooltip) tooltip.style.display = 'none';
+    }
+
+    // Attach listeners via event delegation on body
+    document.body.addEventListener('mouseenter', function(e) {
+        var el = e.target.closest('.uf-has-info');
+        if (el) showTooltip(el);
+    }, true);
+    document.body.addEventListener('mouseleave', function(e) {
+        var el = e.target.closest('.uf-has-info');
+        if (el) hideTooltip();
+    }, true);
+    // Mobile: tap to toggle
+    document.body.addEventListener('click', function(e) {
+        var el = e.target.closest('.uf-has-info');
+        if (el) {
+            if (tooltip && tooltip.style.display === 'block') {
+                hideTooltip();
+            } else {
+                showTooltip(el);
+            }
+        } else {
+            hideTooltip();
+        }
+    });
 
     function processCard() {
         var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
@@ -373,8 +427,37 @@ _SCRIPT_TEMPLATE = r"""
 <style>
 ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
-ruby rt > span[style*="flex-direction"] { margin-bottom: 2px; }
 .uf-pitch-word span { font-size: 1em; }
+
+/* Info tooltip system */
+.uf-has-info { position: relative; cursor: help; }
+.uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
+.uf-info-dot {
+    font-size: 0.45em;
+    vertical-align: super;
+    opacity: 0.35;
+    margin-left: 1px;
+    cursor: help;
+    position: relative;
+    top: -0.5em;
+}
+.uf-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 99999;
+    background: #2a2a3e;
+    color: #ddd;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 14px;
+    line-height: 1.4;
+    max-width: 300px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    pointer-events: none;
+    white-space: normal;
+    word-wrap: break-word;
+}
 </style>
 """
 
@@ -476,15 +559,14 @@ class SettingsDialog(QDialog):
             "<b>Pitch Accent (without reading)</b><br>"
             "Use just the pitch code \u2014 lines are drawn on the base word itself:<br>"
             "<code>\u3077\u3063\u3064\u308a{n3}</code> \u2192 orange line with drop after 3rd mora<br>"
-            "<code>\u304c\u304f\u305b\u3044{h}</code> \u2192 blue flat line on the word<br>"
-            "Add an English gloss after the pitch code:<br>"
-            "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch line + \u201csnapping\u201d above<br><br>"
-            "<b>Reading + Pitch + English (triple)</b><br>"
-            "Add a third semicolon segment for an English meaning:<br>"
-            "<code>\u6c17\u524d{\u304d\u307e\u3048;h;generosity}</code><br>"
-            "\u2192 Shows: <i>generosity</i> (tiny) on top, then pitch-accented \u304d\u307e\u3048, then \u6c17\u524d<br>"
-            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;;to eat}</code><br>"
-            "\u2192 Gloss without pitch (leave pitch code empty)<br><br>"
+            "<code>\u304c\u304f\u305b\u3044{h}</code> \u2192 blue flat line on the word<br><br>"
+            "<b>Info Tooltip (hover/tap)</b><br>"
+            "Add a description as the last segment \u2014 it shows as a \u24D8 tooltip:<br>"
+            "<code>\u6c17\u524d{\u304d\u307e\u3048;h;generosity}</code> \u2192 reading + pitch + tooltip<br>"
+            "<code>\u98df\u3079\u308b{\u305f\u3079\u308b;;to eat}</code> \u2192 reading + tooltip (no pitch)<br>"
+            "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch-only + tooltip<br>"
+            "Hover on desktop or tap on mobile to see the description.<br>"
+            "Tap elsewhere to dismiss on mobile.<br><br>"
             "Pitch accent shows colored lines above the furigana:<br>"
             "\u25aa A <b>top line</b> marks high-pitch mora<br>"
             "\u25aa A <b>vertical step</b> marks where the pitch drops<br>"
