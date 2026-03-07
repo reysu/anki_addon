@@ -123,7 +123,7 @@ _SCRIPT_TEMPLATE = r"""
         var mora = splitMora(reading);
         var moraCount = mora.length;
         var pattern = getPitchPattern(moraCount, type, dropAt);
-        var html = '<span class="uf-pitch-word" style="display:inline-flex;align-items:flex-end;">';
+        var html = '<span class="uf-pitch-word" style="display:contents;">';
 
         for (var i = 0; i < mora.length; i++) {
             var isHigh = pattern[i] === 1;
@@ -488,8 +488,7 @@ _SCRIPT_TEMPLATE = r"""
 
 <style>
 ruby { ruby-align: center; ruby-position: over; }
-ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
-.uf-pitch-word span { font-size: 1em; }
+ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system */
 .uf-has-info { position: relative; cursor: help; }

@@ -70,7 +70,7 @@
         var mora = splitMora(reading);
         var moraCount = mora.length;
         var pattern = getPitchPattern(moraCount, type, dropAt);
-        var html = '<span class="uf-pitch-word" style="display:inline-flex;align-items:flex-end;">';
+        var html = '<span class="uf-pitch-word" style="display:contents;">';
         for (var i = 0; i < mora.length; i++) {
             var isHigh = pattern[i] === 1;
             var nextLow = (i + 1 < mora.length) ? pattern[i + 1] === 0 : false;
@@ -332,8 +332,7 @@
 
 <style>
 ruby { ruby-align: center; ruby-position: over; }
-ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; }
-.uf-pitch-word span { font-size: 1em; }
+ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 .uf-has-info { position: relative; cursor: help; }
 .uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
 .uf-info-dot {
