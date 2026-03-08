@@ -497,12 +497,13 @@ _SCRIPT_TEMPLATE = r"""
         }
     });
 
-    // Hidden furigana: tap to reveal/hide on mobile
+    // Hidden furigana: click/tap to lock revealed, click again to re-hide
     document.body.addEventListener('click', function(e) {
         var hid = e.target.closest('.uf-hidden');
-        if (hid && !e.target.closest('.uf-has-info')) {
-            hid.classList.toggle('uf-revealed');
-        }
+        if (!hid) return;
+        // If it has a tooltip, let the tooltip pin handler deal with that click
+        // but still toggle revealed
+        hid.classList.toggle('uf-revealed');
     }, true);
 
     function processCard() {
