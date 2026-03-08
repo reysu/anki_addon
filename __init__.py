@@ -294,7 +294,8 @@ _SCRIPT_TEMPLATE = r"""
                             // Wrap ruby in a span so tooltip escapes ruby overflow
                             var wrapper = document.createElement('span');
                             wrapper.appendChild(ruby);
-                            wrapWithTooltip(wrapper, parsed.gloss);
+                            var rtEl = ruby.querySelector('rt');
+                            wrapWithTooltip(wrapper, parsed.gloss, rtEl);
                             frag.appendChild(wrapper);
                         } else {
                             frag.appendChild(ruby);
@@ -309,12 +310,19 @@ _SCRIPT_TEMPLATE = r"""
     // ---- Tooltip with pagination ----
     var CHARS_PER_PAGE = 120;
 
-    function wrapWithTooltip(el, text) {
+    function wrapWithTooltip(el, text, rtEl) {
         el.classList.add('uf-has-info');
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
         dot.textContent = '\u24D8';
-        el.appendChild(dot);
+        // Place dot inside <rt> (next to furigana) when available,
+        // otherwise fall back to appending on the wrapper element
+        if (rtEl) {
+            dot.classList.add('uf-info-dot-rt');
+            rtEl.appendChild(dot);
+        } else {
+            el.appendChild(dot);
+        }
 
         var popup = document.createElement('div');
         popup.className = 'uf-tooltip';
@@ -564,6 +572,13 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     right: -0.4em;
     line-height: 1;
     pointer-events: none;
+}
+.uf-info-dot.uf-info-dot-rt {
+    position: static;
+    display: inline;
+    vertical-align: middle;
+    margin-left: 2px;
+    font-size: 0.7em;
 }
 .uf-tooltip {
     display: none;
