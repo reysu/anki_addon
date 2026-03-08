@@ -18,6 +18,9 @@ Syntax:
   word{reading;pitch;desc} -> reading + pitch + info tooltip
   word{reading;?;desc}     -> reading + info tooltip (unknown pitch)
   word{pitch;desc}         -> pitch-only + info tooltip
+  word{!reading}           -> hidden furigana (blurred, hover/tap to reveal)
+  word{!reading;pitch}     -> hidden furigana + pitch (blurred)
+  word{!reading;pitch;desc} -> hidden furigana + pitch + tooltip
 
 Author: Eric Su (reysu)
 """
@@ -175,6 +178,11 @@ _SCRIPT_TEMPLATE = r"""
 
     // ---- Parse annotation ----
     function parseAnnotation(annotation, baseWord) {
+        var hidden = false;
+        if (annotation.charAt(0) === '!') {
+            hidden = true;
+            annotation = annotation.substring(1);
+        }
         var parts = annotation.split(';');
         var reading = null;
         var pitch = null;
@@ -197,7 +205,7 @@ _SCRIPT_TEMPLATE = r"""
             }
         }
 
-        return { reading: reading, pitch: pitch, gloss: gloss };
+        return { reading: reading, pitch: pitch, gloss: gloss, hidden: hidden };
     }
 
     // ---- Main conversion ----
@@ -262,6 +270,7 @@ _SCRIPT_TEMPLATE = r"""
                         var container = document.createElement('span');
                         container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
                                                             parsed.pitch.drop, parsed.pitch.color);
+                        if (parsed.hidden) container.classList.add('uf-hidden');
                         if (parsed.gloss) {
                             wrapWithTooltip(container, parsed.gloss);
                         }
@@ -278,6 +287,7 @@ _SCRIPT_TEMPLATE = r"""
                         }
 
                         var ruby = document.createElement('ruby');
+                        if (parsed.hidden) ruby.classList.add('uf-hidden');
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
 
                         if (parsed.gloss) {
@@ -487,6 +497,14 @@ _SCRIPT_TEMPLATE = r"""
         }
     });
 
+    // Hidden furigana: tap to reveal/hide on mobile
+    document.body.addEventListener('click', function(e) {
+        var hid = e.target.closest('.uf-hidden');
+        if (hid && !e.target.closest('.uf-has-info')) {
+            hid.classList.toggle('uf-revealed');
+        }
+    }, true);
+
     function processCard() {
         var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
         var done = false;
@@ -534,16 +552,17 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system */
-.uf-has-info { position: relative; cursor: help; }
-.uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
+.uf-has-info { position: relative; cursor: help; display: inline; }
 .uf-info-dot {
     font-size: 0.45em;
-    vertical-align: super;
     opacity: 0.35;
     margin-left: 1px;
     cursor: help;
-    position: relative;
-    top: -0.5em;
+    position: absolute;
+    top: 0;
+    right: -0.4em;
+    line-height: 1;
+    pointer-events: none;
 }
 .uf-tooltip {
     display: none;
@@ -584,6 +603,22 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 }
 .uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
 .uf-tt-info { color: #999; font-size: 11px; }
+
+/* Hidden furigana (! prefix) — blurred until hover/tap */
+.uf-hidden rt,
+.uf-hidden .uf-pitch-word {
+    filter: blur(5px);
+    -webkit-filter: blur(5px);
+    transition: filter 0.15s ease;
+    -webkit-transition: -webkit-filter 0.15s ease;
+}
+.uf-hidden:hover rt,
+.uf-hidden:hover .uf-pitch-word,
+.uf-hidden.uf-revealed rt,
+.uf-hidden.uf-revealed .uf-pitch-word {
+    filter: blur(0);
+    -webkit-filter: blur(0);
+}
 </style>
 """
 
@@ -776,6 +811,11 @@ class SettingsDialog(QDialog):
             "<code>\u3077\u3063\u3064\u308a{n3;snapping}</code> \u2192 pitch-only + tooltip<br>"
             "Hover on desktop or tap on mobile to see the description.<br>"
             "Tap elsewhere to dismiss on mobile.<br><br>"
+            "<b>Hidden Furigana (self-test mode)</b><br>"
+            "Add <code>!</code> before the reading to blur it until hover/tap:<br>"
+            "<code>\u98df\u3079\u308b{!\u305f\u3079\u308b}</code> \u2192 furigana hidden until hover/tap<br>"
+            "<code>\u79cb{!\u3042\u304d;a}</code> \u2192 hidden reading + pitch<br>"
+            "Works with all combinations \u2014 tooltips still show normally.<br><br>"
             "Pitch accent shows colored lines above the furigana:<br>"
             "\u25aa A <b>top line</b> marks high-pitch mora<br>"
             "\u25aa A <b>vertical step</b> marks where the pitch drops<br>"

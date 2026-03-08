@@ -99,6 +99,11 @@
 
     // ---- Parse annotation ----
     function parseAnnotation(annotation, baseWord) {
+        var hidden = false;
+        if (annotation.charAt(0) === '!') {
+            hidden = true;
+            annotation = annotation.substring(1);
+        }
         var parts = annotation.split(';');
         var reading = null;
         var pitch = null;
@@ -121,7 +126,7 @@
             }
         }
 
-        return { reading: reading, pitch: pitch, gloss: gloss };
+        return { reading: reading, pitch: pitch, gloss: gloss, hidden: hidden };
     }
 
     // ---- Main conversion ----
@@ -186,6 +191,7 @@
                         var container = document.createElement('span');
                         container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
                                                             parsed.pitch.drop, parsed.pitch.color);
+                        if (parsed.hidden) container.classList.add('uf-hidden');
                         if (parsed.gloss) {
                             wrapWithTooltip(container, parsed.gloss);
                         }
@@ -202,6 +208,7 @@
                         }
 
                         var ruby = document.createElement('ruby');
+                        if (parsed.hidden) ruby.classList.add('uf-hidden');
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
 
                         if (parsed.gloss) {
@@ -411,6 +418,14 @@
         }
     });
 
+    // Hidden furigana: tap to reveal/hide on mobile
+    document.body.addEventListener('click', function(e) {
+        var hid = e.target.closest('.uf-hidden');
+        if (hid && !e.target.closest('.uf-has-info')) {
+            hid.classList.toggle('uf-revealed');
+        }
+    }, true);
+
     function processCard() {
         var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
         var done = false;
@@ -458,16 +473,17 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system */
-.uf-has-info { position: relative; cursor: help; }
-.uf-has-info:hover { background: rgba(255,255,255,0.06); border-radius: 3px; }
+.uf-has-info { position: relative; cursor: help; display: inline; }
 .uf-info-dot {
     font-size: 0.45em;
-    vertical-align: super;
     opacity: 0.35;
     margin-left: 1px;
     cursor: help;
-    position: relative;
-    top: -0.5em;
+    position: absolute;
+    top: 0;
+    right: -0.4em;
+    line-height: 1;
+    pointer-events: none;
 }
 .uf-tooltip {
     display: none;
@@ -508,5 +524,21 @@ ruby rt { font-size: 0.6em; color: inherit; opacity: 0.85; font-weight: normal; 
 }
 .uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
 .uf-tt-info { color: #999; font-size: 11px; }
+
+/* Hidden furigana (! prefix) — blurred until hover/tap */
+.uf-hidden rt,
+.uf-hidden .uf-pitch-word {
+    filter: blur(5px);
+    -webkit-filter: blur(5px);
+    transition: filter 0.15s ease;
+    -webkit-transition: -webkit-filter 0.15s ease;
+}
+.uf-hidden:hover rt,
+.uf-hidden:hover .uf-pitch-word,
+.uf-hidden.uf-revealed rt,
+.uf-hidden.uf-revealed .uf-pitch-word {
+    filter: blur(0);
+    -webkit-filter: blur(0);
+}
 </style>
 <!-- UF-END -->
