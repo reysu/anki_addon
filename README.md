@@ -2,23 +2,51 @@
 
 A modern Anki add-on that converts `{annotation}` syntax into furigana, pitch accent visualization, and info tooltips — on any card, any field.
 
-Works on **Anki Desktop**, **AnkiDroid**, and **AnkiMobile (iOS)**.
+Works on **Anki Desktop**, **AnkiDroid**, and **AnkiMobile (iOS)**
 
 ---
+## Use cases 
+- You can use this addon to instantly visualize the pitch accent.
+  <img width="587" height="99" alt="image" src="https://github.com/user-attachments/assets/b923206b-5321-4aae-b234-4ffa1dc148a2" />
+- If you are making monolingual sentence cards, you can add a short definition in your native language so you can hover over.
+  <img width="182" height="110" alt="image" src="https://github.com/user-attachments/assets/3514561c-6d43-498d-961d-8cbc6fae0807" />
+- This also works for longer definitions, so you can have definitions in definitions or evens descriptions (pagination supported). 
+<img width="359" height="144" alt="image" src="https://github.com/user-attachments/assets/fa16df42-7d27-4cd0-b46d-39803021a878" />
 
-## Features
+<img width="371" height="191" alt="image" src="https://github.com/user-attachments/assets/c0897cd9-882e-4ade-8bfe-eab9c2a20850" />
 
-### Furigana
+## Additional Features
+- Add an english word as furigana 
+<img width="864" height="71" alt="image" src="https://github.com/user-attachments/assets/92bdceb1-5346-4fda-8354-f1327fd9b087" />
 
-Type `word{reading}` in any card field to get furigana above the word.
+- Hide Furigana and pitch accent until you hover
+<img width="164" height="64" alt="image" src="https://github.com/user-attachments/assets/965647e9-2d4b-43de-8960-bed53652f9a9" />
 
-```
-食べる{たべる}   飲む{のむ}   美味しい{おいしい}
-```
+- Add readings for other languages, such as bopomofo 
+<img width="433" height="64" alt="image" src="https://github.com/user-attachments/assets/51284008-a0e0-4097-9080-4d6c7d01cd54" />
 
-![Furigana](screenshots/01_furigana.png)
+- Customize pitch accent readings and furigana size 
+<img width="543" height="329" alt="image" src="https://github.com/user-attachments/assets/021ae043-6615-4001-bce8-b0baccb4c033" />
 
-### Pitch Accent
+
+# How to use it 
+## quick guide
+Add a space before the word and add the information within the curly brackets. Each section is separated by semi-colons. 
+`{<text to display on top>; <pitch accent type>; <information to show on over>}`
+
+For example 
+`学生{がくせい;h;to eat}` 
+<img width="100" height="74" alt="image" src="https://github.com/user-attachments/assets/adb4ae48-9a6d-42ed-b439-c0ec236d9cf1" />
+
+You can leave any of the sections blank 
+`学生{;h;to eat}` 
+<img width="101" height="64" alt="image" src="https://github.com/user-attachments/assets/05963e6d-4f59-4a35-a234-efe2c9a85f22" />
+
+Or 
+`学生{;;to eat}`
+<img width="102" height="57" alt="image" src="https://github.com/user-attachments/assets/e4e8fed7-e062-4556-9cff-af79b5a9ad52" />
+
+## pitch accent types
 
 Add a pitch code after a semicolon to visualize Japanese pitch accent with colored lines:
 
@@ -33,17 +61,15 @@ Add a pitch code after a semicolon to visualize Japanese pitch accent with color
 
 A **top line** marks high-pitch mora. A **vertical tick** marks where the pitch drops. The pattern is always visible — no hover needed.
 
-### Pitch-Only Mode
-
+## pitch-only Mode
 Use just the pitch code without a reading — the lines are drawn directly on the base word:
-
 ```
 ぷっつり{h}    ぷっつり{a}    ぷっつり{n3}    ぷっつり{o}
 ```
 
 ![Pitch Only](screenshots/05_pitch_only.png)
 
-### Info Tooltips
+## info Tooltips
 
 Add a description as the last semicolon segment. It appears as a hover tooltip (desktop) or tap tooltip (mobile):
 
@@ -57,15 +83,7 @@ Add a description as the last semicolon segment. It appears as a hover tooltip (
 
 A small ℹ indicator appears next to words that have a tooltip. Hover on desktop, tap on mobile. Tap elsewhere to dismiss.
 
-### Mix Everything in a Sentence
-
-All modes work together in the same card:
-
-![Mixed](screenshots/03_mixed.png)
-
----
-
-## Syntax Reference
+## Examples
 
 | You Type | Result |
 |----------|--------|
@@ -89,12 +107,6 @@ All modes work together in the same card:
 1. Download `universal_furigana.ankiaddon` from this repo
 2. In Anki, go to **Tools → Add-ons → Install from file...**
 3. Select the downloaded file and restart Anki
-
-### From source
-
-1. Clone this repo
-2. Copy `__init__.py`, `config.json`, and `manifest.json` into a folder inside your Anki add-ons directory (`~/.local/share/Anki2/addons21/universal_furigana/` on Linux, or find it via **Tools → Add-ons → View Files**)
-3. Restart Anki
 
 ---
 
@@ -120,16 +132,6 @@ The add-on works automatically on Anki Desktop. To make it work on **AnkiDroid**
 5. Sync your collection
 
 The add-on injects the script directly into your card templates so it travels with your cards when you sync. If you change colors or settings, saving will update the injected code automatically.
-
----
-
-## How It Works
-
-- The `{annotation}` syntax stays as plain text in your card fields
-- On desktop, a `card_will_show` hook injects JavaScript at render time
-- For mobile, the same JavaScript is written into card templates (persists through sync)
-- The JavaScript scans for `word{annotation}` patterns and replaces them with `<ruby>` elements, pitch lines, and tooltips
-- Your card data is never permanently modified — uninstalling just shows the raw curly-brace syntax
 
 ---
 
