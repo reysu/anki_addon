@@ -22,7 +22,7 @@ Works on **Anki Desktop**, **AnkiDroid**, and **AnkiMobile (iOS)**
 - Hide Furigana and pitch accent until you hover
 <img width="164" height="64" alt="image" src="https://github.com/user-attachments/assets/965647e9-2d4b-43de-8960-bed53652f9a9" />
 
-- Add readings for other languages, such as bopomofo 
+- Add readings for other languages, such as bopomofo (add `!` immediately after opening curly brackets)
 <img width="433" height="64" alt="image" src="https://github.com/user-attachments/assets/51284008-a0e0-4097-9080-4d6c7d01cd54" />
 
 - Customize pitch accent readings and furigana size 
