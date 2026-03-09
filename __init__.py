@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10d)
+Universal Furigana Add-on for Anki (v10e)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -390,7 +390,7 @@ _SCRIPT_TEMPLATE = r"""
             var tid = this.getAttribute('data-uf-tt');
             var p = document.getElementById(tid);
             if (!p) return;
-            if (p.classList.contains('uf-tt-visible')) {
+            if (p.style.display === 'block') {
                 hidePopup(this);
             } else {
                 hideAllPopups();
@@ -454,46 +454,47 @@ _SCRIPT_TEMPLATE = r"""
         if (!popup) return;
         popup.setAttribute('data-page', '0');
         renderPage(popup);
-        // Read element rect first (batch DOM reads before writes)
+        // Use fixed positioning relative to viewport — no layout impact
+        popup.style.display = 'block';
+        popup.style.position = 'fixed';
         var elRect = el.getBoundingClientRect();
-        // Make visible at a temp position so we can measure
-        popup.style.left = '-9999px';
-        popup.style.top = '-9999px';
-        popup.classList.add('uf-tt-visible');
-        // Now measure popup size and position properly
-        var pW = popup.offsetWidth;
-        var pH = popup.offsetHeight;
         var left = elRect.left;
         var top = elRect.bottom + 2;
-        // Clamp right edge
-        if (left + pW > window.innerWidth - 4) {
-            left = Math.max(4, window.innerWidth - pW - 4);
-        }
-        // Clamp left edge
-        if (left < 4) left = 4;
-        // If overflows bottom, show above the word instead
-        if (top + pH > window.innerHeight) {
-            top = elRect.top - pH - 2;
-        }
         popup.style.left = left + 'px';
         popup.style.top = top + 'px';
+        // Measure and clamp to viewport
+        var pRect = popup.getBoundingClientRect();
+        // Clamp right edge
+        if (pRect.right > window.innerWidth - 4) {
+            popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
+        }
+        // Clamp left edge
+        pRect = popup.getBoundingClientRect();
+        if (pRect.left < 4) {
+            popup.style.left = '4px';
+        }
+        // If overflows bottom, show above the word instead
+        pRect = popup.getBoundingClientRect();
+        if (pRect.bottom > window.innerHeight) {
+            popup.style.top = (elRect.top - pRect.height - 2) + 'px';
+        }
     }
 
     function hidePopup(el) {
         var popup = getPopupForEl(el);
         if (popup) {
-            popup.classList.remove('uf-tt-visible');
-            popup.style.left = '-9999px';
-            popup.style.top = '-9999px';
+            popup.style.display = 'none';
+            popup.style.left = '';
+            popup.style.top = '';
         }
     }
 
     function hideAllPopups() {
-        var popups = document.querySelectorAll('.uf-tt-visible');
+        var popups = document.getElementsByClassName('uf-tooltip');
         for (var i = 0; i < popups.length; i++) {
-            popups[i].classList.remove('uf-tt-visible');
-            popups[i].style.left = '-9999px';
-            popups[i].style.top = '-9999px';
+            popups[i].style.display = 'none';
+            popups[i].style.left = '';
+            popups[i].style.top = '';
         }
     }
 
@@ -622,8 +623,8 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
-.uf-has-info { /* no cursor change — avoids Qt WebEngine reflow on ruby elements */ }
-#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; contain: layout style; }
+.uf-has-info { cursor: pointer; }
+#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
 .uf-info-dot {
     font-size: 0.55em;
     opacity: 0.35;
@@ -640,10 +641,8 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     font-size: 0.7em;
 }
 .uf-tooltip {
-    visibility: hidden;
+    display: none;
     position: fixed;
-    top: -9999px;
-    left: -9999px;
     z-index: 99999;
     background: #2a2a3e;
     color: #ddd;
@@ -657,13 +656,9 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     max-height: 30vh;
     overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: none;
+    pointer-events: auto;
     white-space: normal;
     word-wrap: break-word;
-}
-.uf-tooltip.uf-tt-visible {
-    visibility: visible;
-    pointer-events: auto;
 }
 .uf-tt-nav {
     display: flex;
@@ -1665,23 +1660,21 @@ def _do_lookup(editor):
     # so that we replace the correct instance when duplicates exist.
     editor.web.evalWithCallback(
         "(() => {"
-        "  const s = window.getSelection();"
+        "  var s = window.getSelection();"
         "  if (!s || !s.rangeCount) return JSON.stringify({text:'',occ:0});"
-        "  const text = s.toString().trim();"
+        "  var text = s.toString().trim();"
         "  if (!text) return JSON.stringify({text:'',occ:0});"
-        "  const range = s.getRangeAt(0);"
-        "  const field = range.startContainer;"
-        "  let root = field;"
-        "  while (root && !root.classList?.contains('field'))"
+        "  var range = s.getRangeAt(0);"
+        "  var root = range.startContainer;"
+        "  while (root && !(root.classList && root.classList.contains('field')))"
         "    root = root.parentNode;"
-        "  if (!root) root = field;"
-        "  const full = root.textContent || '';"
-        "  const beforeRange = document.createRange();"
+        "  if (!root) root = range.startContainer;"
+        "  var beforeRange = document.createRange();"
         "  beforeRange.setStart(root, 0);"
         "  beforeRange.setEnd(range.startContainer, range.startOffset);"
-        "  const before = beforeRange.toString();"
-        "  let occ = 0;"
-        "  let pos = -1;"
+        "  var before = beforeRange.toString();"
+        "  var occ = 0;"
+        "  var pos = -1;"
         "  while ((pos = before.indexOf(text, pos + 1)) !== -1) occ++;"
         "  return JSON.stringify({text: text, occ: occ});"
         "})()",
@@ -1782,9 +1775,6 @@ def _insert_with_spaces(html, old, new, occurrence=0):
     adding a space before/after the annotation when the neighboring
     character is not already a space, newline, or tag boundary.
     *occurrence* is 0-based: 0 = first, 1 = second, etc."""
-    # Walk through the plain-text layer of *html* to find the right
-    # occurrence.  We strip HTML tags for counting but track positions
-    # in the original string so we replace at the correct offset.
     idx = -1
     search_start = 0
     for _ in range(occurrence + 1):
@@ -1792,7 +1782,6 @@ def _insert_with_spaces(html, old, new, occurrence=0):
         if idx == -1:
             return html
         search_start = idx + 1
-    # idx now points at the occurrence-th match
     before = html[:idx]
     after = html[idx + len(old):]
     # Add space before if needed
@@ -1894,7 +1883,6 @@ def _handle_sentence_lookup(editor, sentence, field_idx, occurrence=0):
                     + field_html[idx + len(sentence):]
                 )
             else:
-                # Fallback: replace first occurrence
                 new_html = field_html.replace(sentence, annotated, 1)
             if new_html != field_html:
                 editor.note.fields[field_idx] = new_html
