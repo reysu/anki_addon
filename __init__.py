@@ -43,6 +43,8 @@ from aqt.qt import (
     QTabWidget, QComboBox
 )
 
+sys.stderr.write("[Universal Furigana] Add-on loaded successfully\n")
+
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -299,15 +301,11 @@ _SCRIPT_TEMPLATE = r"""
                         ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
 
                         if (parsed.gloss) {
-                            // Wrap ruby in a span so tooltip escapes ruby overflow
-                            var wrapper = document.createElement('span');
-                            wrapper.appendChild(ruby);
+                            // Attach tooltip directly to the ruby element (no wrapper needed)
                             var rtEl = ruby.querySelector('rt');
-                            wrapWithTooltip(wrapper, parsed.gloss, rtEl);
-                            frag.appendChild(wrapper);
-                        } else {
-                            frag.appendChild(ruby);
+                            wrapWithTooltip(ruby, parsed.gloss, rtEl);
                         }
+                        frag.appendChild(ruby);
                     }
                 }
             }
@@ -602,22 +600,19 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
-.uf-has-info { position: relative; cursor: help; display: inline; }
+.uf-has-info { cursor: help; }
 #uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
 .uf-info-dot {
-    font-size: 0.45em;
+    font-size: 0.55em;
     opacity: 0.35;
-    margin-left: 1px;
     cursor: help;
-    position: absolute;
-    top: 0;
-    right: -0.4em;
-    line-height: 1;
+    vertical-align: super;
+    line-height: 0;
     pointer-events: none;
+    margin-left: 0;
+    margin-right: 0;
 }
 .uf-info-dot.uf-info-dot-rt {
-    position: static;
-    display: inline;
     vertical-align: middle;
     margin-left: 2px;
     font-size: 0.7em;
@@ -1622,15 +1617,18 @@ def _is_sentence(text):
 
 def _on_editor_did_init_buttons(buttons, editor):
     """Add lookup button to editor toolbar."""
-    btn = editor.addButton(
-        icon=None,
-        cmd="uf_lookup",
-        func=lambda ed: _do_lookup(ed),
-        tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
-        label="UF\u8f9e",
-        keys="Ctrl+Shift+F",
-    )
-    buttons.append(btn)
+    try:
+        btn = editor.addButton(
+            icon=None,
+            cmd="uf_lookup",
+            func=lambda ed: _do_lookup(ed),
+            tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
+            label="UF\u8f9e",
+            keys="Ctrl+Shift+F",
+        )
+        buttons.append(btn)
+    except Exception as exc:
+        sys.stderr.write("[UF] editor button error: %s\n" % exc)
 
 
 def _do_lookup(editor):
@@ -2168,8 +2166,16 @@ class _LookupPreviewDialog(QDialog):
         return _build_annotation(self.word, r)
 
 
-# Register editor hook
-gui_hooks.editor_did_init_buttons.append(_on_editor_did_init_buttons)
+# Register editor hook — try new-style first, fall back to legacy
+try:
+    gui_hooks.editor_did_init_buttons.append(_on_editor_did_init_buttons)
+except AttributeError:
+    # Very old Anki without this hook — use legacy filter
+    from anki.hooks import addHook
+    def _legacy_setup_buttons(buttons, editor):
+        _on_editor_did_init_buttons(buttons, editor)
+        return buttons
+    addHook("setupEditorButtons", _legacy_setup_buttons)
 
 
 # ---------------------------------------------------------------------------
