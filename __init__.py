@@ -1187,6 +1187,10 @@ def _on_editor_did_init(editor):
 
 def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
+    # Grab selected text AND the current field index so we can
+    # do the replacement directly on the note field after the
+    # preview dialog closes (the selection is lost once the
+    # dialog takes focus).
     editor.web.evalWithCallback(
         "(() => {"
         "  const s = window.getSelection();"
@@ -1219,25 +1223,24 @@ def _handle_lookup_result(editor, selected_text):
         )
         return
 
+    # Remember which field is active so we can replace in it
+    field_idx = editor.currentField
+
     dialog = _LookupPreviewDialog(
         editor.parentWindow, selected_text, result
     )
     if dialog.exec():
         annotation = dialog.get_annotation()
-        if annotation:
-            js_ann = json.dumps(annotation)
-            editor.web.eval(
-                "(() => {"
-                "  const s = window.getSelection();"
-                "  if (s && s.rangeCount > 0) {"
-                "    const r = s.getRangeAt(0);"
-                "    r.deleteContents();"
-                "    r.insertNode(document.createTextNode(%s));"
-                "    s.collapseToEnd();"
-                "  }"
-                "})()" % js_ann
-            )
-            if editor.currentField is not None:
+        if annotation and editor.note is not None and field_idx is not None:
+            # Replace directly in the note field HTML.
+            # This avoids selection-loss issues when the dialog
+            # steals focus from the editor's webview.
+            field_html = editor.note.fields[field_idx]
+            # Replace only the first occurrence of the selected
+            # word to avoid unintended replacements elsewhere.
+            new_html = field_html.replace(selected_text, annotation, 1)
+            if new_html != field_html:
+                editor.note.fields[field_idx] = new_html
                 editor.loadNoteKeepingFocus()
 
 
