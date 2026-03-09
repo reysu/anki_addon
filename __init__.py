@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v9)
+Universal Furigana Add-on for Anki (v10)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -315,11 +315,26 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
-    // ---- Tooltip with pagination ----
+    // ---- Tooltip with pagination (portal-based to avoid layout shift) ----
     var CHARS_PER_PAGE = 120;
+    var _ufTooltipId = 0;
+
+    // Get or create the portal container for tooltips (lives outside text flow)
+    function getTooltipPortal() {
+        var portal = document.getElementById('uf-tooltip-portal');
+        if (!portal) {
+            portal = document.createElement('div');
+            portal.id = 'uf-tooltip-portal';
+            document.body.appendChild(portal);
+        }
+        return portal;
+    }
 
     function wrapWithTooltip(el, text, rtEl) {
         el.classList.add('uf-has-info');
+        var tooltipId = 'uf-tt-' + (_ufTooltipId++);
+        el.setAttribute('data-uf-tt', tooltipId);
+
         var dot = document.createElement('span');
         dot.className = 'uf-info-dot';
         dot.textContent = '\u24D8';
@@ -332,8 +347,10 @@ _SCRIPT_TEMPLATE = r"""
             el.appendChild(dot);
         }
 
+        // Build popup in portal (outside text flow entirely)
         var popup = document.createElement('div');
         popup.className = 'uf-tooltip';
+        popup.id = tooltipId;
 
         var pages = paginate(text);
         popup.setAttribute('data-pages', JSON.stringify(pages));
@@ -364,14 +381,16 @@ _SCRIPT_TEMPLATE = r"""
             popup.appendChild(nav);
         }
 
-        el.appendChild(popup);
+        // Append to portal, NOT inside the word element
+        getTooltipPortal().appendChild(popup);
 
-        // Direct touch handler for mobile (like Migaku ontouchend)
+        // Direct touch handler for mobile
         el.addEventListener('touchend', function(ev) {
             // Let nav arrow taps through without toggling
             if (ev.target.closest('.uf-tt-prev, .uf-tt-next')) return;
             ev.preventDefault();
-            var p = this.querySelector('.uf-tooltip');
+            var tid = this.getAttribute('data-uf-tt');
+            var p = document.getElementById(tid);
             if (!p) return;
             if (p.style.display === 'block') {
                 hidePopup(this);
@@ -427,32 +446,44 @@ _SCRIPT_TEMPLATE = r"""
         if (next) next.style.opacity = idx < pages.length - 1 ? '1' : '0.25';
     }
 
+    function getPopupForEl(el) {
+        var tid = el.getAttribute('data-uf-tt');
+        return tid ? document.getElementById(tid) : null;
+    }
+
     function showPopup(el) {
-        var popup = el.querySelector('.uf-tooltip');
+        var popup = getPopupForEl(el);
         if (!popup) return;
         popup.setAttribute('data-page', '0');
         renderPage(popup);
+        // Use fixed positioning relative to viewport — no layout impact
         popup.style.display = 'block';
-        popup.style.position = 'absolute';
-        popup.style.left = '0px';
-        popup.style.top = el.offsetHeight + 'px';
+        popup.style.position = 'fixed';
+        var elRect = el.getBoundingClientRect();
+        var left = elRect.left;
+        var top = elRect.bottom + 2;
+        popup.style.left = left + 'px';
+        popup.style.top = top + 'px';
+        // Measure and clamp to viewport
         var pRect = popup.getBoundingClientRect();
-        var card = el.closest('.card') || document.body;
-        var cardRect = card.getBoundingClientRect();
-        var rightEdge = pRect.left + pRect.width;
-        var limit = cardRect.left + cardRect.width;
-        if (rightEdge > limit) {
-            popup.style.left = '-' + (rightEdge - limit + 4) + 'px';
+        // Clamp right edge
+        if (pRect.right > window.innerWidth - 4) {
+            popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
         }
-        if (pRect.left < 4) popup.style.left = (4 - el.getBoundingClientRect().left) + 'px';
+        // Clamp left edge
         pRect = popup.getBoundingClientRect();
-        if (pRect.top + pRect.height > window.innerHeight) {
-            popup.style.top = '-' + (popup.offsetHeight + 3) + 'px';
+        if (pRect.left < 4) {
+            popup.style.left = '4px';
+        }
+        // If overflows bottom, show above the word instead
+        pRect = popup.getBoundingClientRect();
+        if (pRect.bottom > window.innerHeight) {
+            popup.style.top = (elRect.top - pRect.height - 2) + 'px';
         }
     }
 
     function hidePopup(el) {
-        var popup = el.querySelector('.uf-tooltip');
+        var popup = getPopupForEl(el);
         if (popup) {
             popup.style.display = 'none';
             popup.style.left = '';
@@ -485,6 +516,8 @@ _SCRIPT_TEMPLATE = r"""
     document.body.addEventListener('click', function(e) {
         // Let nav arrows work without toggling pin
         if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
+        // Clicks inside a portal tooltip should not dismiss it
+        if (e.target.closest('.uf-tooltip')) return;
         var el = e.target.closest('.uf-has-info');
         if (el) {
             if (_pinned === el) {
@@ -507,7 +540,7 @@ _SCRIPT_TEMPLATE = r"""
 
     // Mobile: tap outside to dismiss all popups
     document.body.addEventListener('touchend', function(e) {
-        if (!e.target.closest('.uf-has-info')) {
+        if (!e.target.closest('.uf-has-info') && !e.target.closest('.uf-tooltip')) {
             _pinned = null;
             hideAllPopups();
         }
@@ -568,8 +601,9 @@ _SCRIPT_TEMPLATE = r"""
 ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
-/* Info tooltip system */
+/* Info tooltip system — portal-based (tooltip lives outside text flow) */
 .uf-has-info { position: relative; cursor: help; display: inline; }
+#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
 .uf-info-dot {
     font-size: 0.45em;
     opacity: 0.35;
@@ -590,7 +624,7 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 }
 .uf-tooltip {
     display: none;
-    position: absolute;
+    position: fixed;
     z-index: 99999;
     background: #2a2a3e;
     color: #ddd;
@@ -1586,9 +1620,9 @@ def _is_sentence(text):
 # Editor integration: toolbar button + lookup
 # ---------------------------------------------------------------------------
 
-def _on_editor_did_init(editor):
+def _on_editor_did_init_buttons(buttons, editor):
     """Add lookup button to editor toolbar."""
-    editor.addButton(
+    btn = editor.addButton(
         icon=None,
         cmd="uf_lookup",
         func=lambda ed: _do_lookup(ed),
@@ -1596,6 +1630,7 @@ def _on_editor_did_init(editor):
         label="UF\u8f9e",
         keys="Ctrl+Shift+F",
     )
+    buttons.append(btn)
 
 
 def _do_lookup(editor):
@@ -1637,22 +1672,22 @@ def _handle_lookup_result(editor, selected_text):
         return
 
     # --- Single-word mode ---
-    result = db.lookup(selected_text)
+    result = db.lookup_all(selected_text)
 
     if (not result["reading"] and not result["pitch_code"]
-            and not result["definition"]):
+            and not result["all_definitions"]):
         # If MeCab is available, try lemma (dictionary form)
         if _check_mecab():
             tokens = _tokenize_sentence(selected_text)
             # If it tokenized to 1 content token, try its lemma
             content = [t for t in tokens if not t["skip"]]
             if len(content) == 1 and content[0]["lemma"] != selected_text:
-                result = db.lookup(content[0]["lemma"])
+                result = db.lookup_all(content[0]["lemma"])
                 if result["reading"] is None:
                     result["reading"] = content[0]["reading"]
 
     if (not result["reading"] and not result["pitch_code"]
-            and not result["definition"]):
+            and not result["all_definitions"]):
         from aqt.utils import showInfo
         msg = "No results found for: %s" % selected_text
         if not _check_mecab():
@@ -1678,10 +1713,29 @@ def _handle_lookup_result(editor, selected_text):
         annotation = dialog.get_annotation()
         if annotation and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
-            new_html = field_html.replace(selected_text, annotation, 1)
-            if new_html != field_html:
-                editor.note.fields[field_idx] = new_html
+            spaced = _insert_with_spaces(field_html, selected_text, annotation)
+            if spaced != field_html:
+                editor.note.fields[field_idx] = spaced
                 editor.loadNoteKeepingFocus()
+
+
+def _insert_with_spaces(html, old, new):
+    """Replace *old* with *new* in *html*, adding a space before/after
+    the annotation when the neighboring character is not already a space,
+    newline, or tag boundary.  This prevents {annotations} from merging
+    into adjacent text."""
+    idx = html.find(old)
+    if idx == -1:
+        return html
+    before = html[:idx]
+    after = html[idx + len(old):]
+    # Add space before if needed
+    if before and before[-1] not in (' ', '\n', '\t', '>', '\u3000'):
+        before += ' '
+    # Add space after if needed
+    if after and after[0] not in (' ', '\n', '\t', '<', '\u3000'):
+        new = new + ' '
+    return before + new + after
 
 
 # ---------------------------------------------------------------------------
@@ -1981,7 +2035,7 @@ class _LookupPreviewDialog(QDialog):
     def __init__(self, parent, word, result):
         super().__init__(parent)
         self.setWindowTitle("Dictionary Lookup \u2014 %s" % word)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         self.word = word
         self.result = result
         self._setup_ui()
@@ -2014,15 +2068,47 @@ class _LookupPreviewDialog(QDialog):
         ))
         layout.addWidget(pg)
 
-        # Definition
-        dg = QGroupBox("Definition / Tooltip")
-        dl = QVBoxLayout(dg)
+        # Dictionary selector dropdown
+        all_defs = self.result.get("all_definitions") or []
+        if all_defs:
+            dg = QGroupBox("Dictionary")
+            dl = QVBoxLayout(dg)
+            self.dict_combo = QComboBox()
+            self.dict_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            for d in all_defs:
+                label = d["text"]
+                if len(label) > 80:
+                    label = label[:77] + "..."
+                src = d.get("dict_name", "")
+                if src:
+                    label = "[%s] %s" % (src, label)
+                self.dict_combo.addItem(label, d["text"])
+            self.dict_combo.addItem("(none)")
+            dl.addWidget(self.dict_combo)
+            layout.addWidget(dg)
+
+            # When dictionary selection changes, populate the definition field
+            def _on_dict_change(index):
+                data = self.dict_combo.currentData()
+                if data:  # not the "(none)" entry
+                    self.def_edit.setPlainText(data)
+                else:
+                    self.def_edit.clear()
+            self.dict_combo.currentIndexChanged.connect(_on_dict_change)
+        else:
+            self.dict_combo = None
+
+        # Definition / Tooltip (editable)
+        tg = QGroupBox("Definition / Tooltip")
+        tl = QVBoxLayout(tg)
         self.def_edit = QTextEdit()
         self.def_edit.setPlainText(self.result.get("definition") or "")
         self.def_edit.setPlaceholderText("English definition or notes...")
         self.def_edit.setMaximumHeight(100)
-        dl.addWidget(self.def_edit)
-        layout.addWidget(dg)
+        tl.addWidget(self.def_edit)
+        layout.addWidget(tg)
 
         # Preview
         self.preview_label = QLabel()
@@ -2083,7 +2169,7 @@ class _LookupPreviewDialog(QDialog):
 
 
 # Register editor hook
-gui_hooks.editor_did_init.append(_on_editor_did_init)
+gui_hooks.editor_did_init_buttons.append(_on_editor_did_init_buttons)
 
 
 # ---------------------------------------------------------------------------
