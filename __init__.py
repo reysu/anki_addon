@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10e)
+Universal Furigana Add-on for Anki (v10f)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -623,12 +623,12 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
-.uf-has-info { cursor: pointer; }
+.uf-has-info { cursor: help; }
 #uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
 .uf-info-dot {
     font-size: 0.55em;
     opacity: 0.35;
-    cursor: pointer;
+    cursor: help;
     vertical-align: super;
     line-height: 0;
     pointer-events: none;
@@ -1213,31 +1213,24 @@ class _DictDB:
 
         dicts = self.get_dictionaries()
 
-        # Pitch — build a cache of reading → pitch_code for this word,
-        # then pick the first match as default
-        pitch_by_reading = {}  # reading -> pitch_code
-        for d in dicts:
-            if d["type"] not in ("pitch", "both"):
-                continue
-            rows = c.execute(
-                "SELECT reading, position FROM pitch_accents "
-                "WHERE expression=? AND dict_id=?",
-                (word, d["id"])
-            ).fetchall()
-            for row in rows:
-                rdg = row[0]
-                if rdg and rdg not in pitch_by_reading:
-                    pitch_by_reading[rdg] = _position_to_uf_code(
-                        row[1], rdg
-                    )
-        if not result["pitch_code"] and pitch_by_reading:
-            first_rdg = next(iter(pitch_by_reading))
-            result["pitch_code"] = pitch_by_reading[first_rdg]
-            if result["reading"] is None:
-                result["reading"] = first_rdg
+        # Pitch (first match wins — skip if user words already provided)
+        if not result["pitch_code"]:
+            for d in dicts:
+                if d["type"] not in ("pitch", "both"):
+                    continue
+                row = c.execute(
+                    "SELECT reading, position FROM pitch_accents "
+                    "WHERE expression=? AND dict_id=? LIMIT 1",
+                    (word, d["id"])
+                ).fetchone()
+                if row:
+                    result["pitch_code"] = _position_to_uf_code(row[1], row[0])
+                    if result["reading"] is None:
+                        result["reading"] = row[0]
+                    break
 
         # Definitions — collect ALL across all term dicts
-        # Also store per-entry reading + pitch so switching dicts updates all
+        # Also store per-entry reading + pitch for dict-switch UI
         for d in dicts:
             if d["type"] not in ("term", "both"):
                 continue
@@ -1251,12 +1244,21 @@ class _DictDB:
                 entry_reading = row[0] or None
                 if result["reading"] is None:
                     result["reading"] = entry_reading
+                # Look up pitch for this specific reading
+                entry_pitch = ""
+                if entry_reading:
+                    pr = c.execute(
+                        "SELECT position FROM pitch_accents "
+                        "WHERE expression=? AND reading=? LIMIT 1",
+                        (word, entry_reading)
+                    ).fetchone()
+                    if pr:
+                        entry_pitch = _position_to_uf_code(
+                            pr[0], entry_reading
+                        )
                 try:
                     defs = json.loads(row[1])
                     meaningful = [x for x in defs if x.strip()]
-                    entry_pitch = pitch_by_reading.get(
-                        entry_reading, ""
-                    ) if entry_reading else ""
                     for defn in meaningful:
                         result["all_definitions"].append({
                             "text": defn,
@@ -1672,7 +1674,7 @@ def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
     editor.web.evalWithCallback(
         "(() => {"
-        "  var s = window.getSelection();"
+        "  const s = window.getSelection();"
         "  return s ? s.toString().trim() : '';"
         "})()",
         lambda text: _handle_lookup_result(editor, text)
@@ -1748,9 +1750,7 @@ def _handle_lookup_result(editor, selected_text):
         annotation = dialog.get_annotation()
         if annotation and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
-            spaced = _insert_with_spaces(
-                field_html, selected_text, annotation
-            )
+            spaced = _insert_with_spaces(field_html, selected_text, annotation)
             if spaced != field_html:
                 editor.note.fields[field_idx] = spaced
                 editor.loadNoteKeepingFocus()
@@ -1759,27 +1759,11 @@ def _handle_lookup_result(editor, selected_text):
 def _insert_with_spaces(html, old, new):
     """Replace *old* with *new* in *html*, adding a space before/after
     the annotation when the neighboring character is not already a space,
-    newline, or tag boundary.  When *old* appears more than once, prefer
-    the first occurrence that is NOT already annotated (i.e. not
-    immediately followed by '{')."""
-    # Collect all occurrence positions
-    positions = []
-    start = 0
-    while True:
-        idx = html.find(old, start)
-        if idx == -1:
-            break
-        positions.append(idx)
-        start = idx + 1
-    if not positions:
+    newline, or tag boundary.  This prevents {annotations} from merging
+    into adjacent text."""
+    idx = html.find(old)
+    if idx == -1:
         return html
-    # Prefer the first occurrence not already inside an annotation
-    idx = positions[0]  # default: first
-    for pos in positions:
-        after_pos = pos + len(old)
-        if after_pos >= len(html) or html[after_pos] != '{':
-            idx = pos
-            break
     before = html[:idx]
     after = html[idx + len(old):]
     # Add space before if needed
@@ -1944,7 +1928,6 @@ class _SentenceLookupDialog(QDialog):
             dict_combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
-            _row_defs = []  # parallel list of entry dicts for this row
             if all_defs:
                 for d in all_defs:
                     label = d["text"]
@@ -1954,9 +1937,7 @@ class _SentenceLookupDialog(QDialog):
                     if src:
                         label = "[%s] %s" % (src, label)
                     dict_combo.addItem(label, d["text"])
-                    _row_defs.append(d)
             dict_combo.addItem("(none)")
-            _row_defs.append(None)
 
             # Reading / Pitch / Tooltip fields
             reading_edit = QLineEdit(result.get("reading") or "")
@@ -1973,22 +1954,20 @@ class _SentenceLookupDialog(QDialog):
             # When dictionary selection changes, update tooltip,
             # reading, and pitch
             def _on_dict_change(
-                index, defs=_row_defs, tip=tooltip_edit,
+                index, defs=all_defs, tip=tooltip_edit,
                 rdg=reading_edit, pit=pitch_edit
             ):
                 if index < 0 or index >= len(defs):
+                    tip.clear()
                     return
                 entry = defs[index]
-                if entry:
-                    tip.setText(entry["text"])
-                    r = entry.get("reading") or ""
-                    p = entry.get("pitch") or ""
-                    if r:
-                        rdg.setText(r)
-                    if p:
-                        pit.setText(p)
-                else:
-                    tip.clear()
+                tip.setText(entry["text"])
+                r = entry.get("reading") or ""
+                p = entry.get("pitch") or ""
+                if r:
+                    rdg.setText(r)
+                if p:
+                    pit.setText(p)
             dict_combo.currentIndexChanged.connect(_on_dict_change)
 
             grid.addWidget(cb, row_num, 0)
@@ -2140,6 +2119,7 @@ class _LookupPreviewDialog(QDialog):
 
         # Dictionary selector dropdown
         all_defs = self.result.get("all_definitions") or []
+        self._all_defs = all_defs  # store for _on_dict_change
         if all_defs:
             dg = QGroupBox("Dictionary")
             dl = QVBoxLayout(dg)
@@ -2147,7 +2127,6 @@ class _LookupPreviewDialog(QDialog):
             self.dict_combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
-            self._def_entries = []  # parallel list of entry dicts
             for d in all_defs:
                 label = d["text"]
                 if len(label) > 80:
@@ -2156,28 +2135,25 @@ class _LookupPreviewDialog(QDialog):
                 if src:
                     label = "[%s] %s" % (src, label)
                 self.dict_combo.addItem(label, d["text"])
-                self._def_entries.append(d)
             self.dict_combo.addItem("(none)")
-            self._def_entries.append(None)
             dl.addWidget(self.dict_combo)
             layout.addWidget(dg)
 
             # When dictionary selection changes, update definition,
             # reading, and pitch fields
             def _on_dict_change(index):
-                if index < 0 or index >= len(self._def_entries):
-                    return
-                entry = self._def_entries[index]
-                if entry:
-                    self.def_edit.setPlainText(entry["text"])
-                    rdg = entry.get("reading") or ""
-                    pit = entry.get("pitch") or ""
-                    if rdg:
-                        self.reading_edit.setText(rdg)
-                    if pit:
-                        self.pitch_edit.setText(pit)
-                else:
+                if index < 0 or index >= len(self._all_defs):
+                    # "(none)" selected or out of range
                     self.def_edit.clear()
+                    return
+                entry = self._all_defs[index]
+                self.def_edit.setPlainText(entry["text"])
+                rdg = entry.get("reading") or ""
+                pit = entry.get("pitch") or ""
+                if rdg:
+                    self.reading_edit.setText(rdg)
+                if pit:
+                    self.pitch_edit.setText(pit)
             self.dict_combo.currentIndexChanged.connect(_on_dict_change)
         else:
             self.dict_combo = None
