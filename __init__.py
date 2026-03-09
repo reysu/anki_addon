@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v8)
+Universal Furigana Add-on for Anki (v9)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -58,6 +58,7 @@ _DEFAULT_CONFIG = {
     "line_thickness": 2,
     "furigana_font_size": 0.6,  # em units, relative to base text
     "injected_templates": [],  # list of "NoteType::CardName::side" entries
+    "skip_particles": True,  # skip particles (助詞) in sentence mode
 }
 
 
@@ -1085,7 +1086,12 @@ class _DictDB:
     # ---- Lookup methods ----
 
     def lookup(self, word):
-        """Look up a word. First-match-wins across dicts by priority."""
+        """Look up a word. User words first, then dicts by priority."""
+        # Check user words first (highest priority)
+        uw = _user_word_lookup(word)
+        if uw and (uw["reading"] or uw["pitch_code"] or uw["definition"]):
+            return uw
+
         c = self.conn()
         result = {"reading": None, "pitch_code": None, "definition": None}
         dicts = self.get_dictionaries()
@@ -1134,29 +1140,44 @@ class _DictDB:
 
         Returns dict with same shape as lookup(), plus:
             all_definitions — list of {"text": ..., "dict_name": ...}
+        User words are checked first and appear at the top.
         """
         c = self.conn()
         result = {"reading": None, "pitch_code": None, "definition": None,
                   "all_definitions": []}
+
+        # Check user words first (highest priority)
+        uw = _user_word_lookup(word)
+        if uw:
+            if uw.get("reading"):
+                result["reading"] = uw["reading"]
+            if uw.get("pitch_code"):
+                result["pitch_code"] = uw["pitch_code"]
+            if uw.get("definition"):
+                result["all_definitions"].append({
+                    "text": uw["definition"],
+                    "dict_name": "\u2605 User Words",
+                })
+
         dicts = self.get_dictionaries()
 
-        # Pitch (first match wins)
-        for d in dicts:
-            if d["type"] not in ("pitch", "both"):
-                continue
-            row = c.execute(
-                "SELECT reading, position FROM pitch_accents "
-                "WHERE expression=? AND dict_id=? LIMIT 1",
-                (word, d["id"])
-            ).fetchone()
-            if row:
-                result["pitch_code"] = _position_to_uf_code(row[1], row[0])
-                if result["reading"] is None:
-                    result["reading"] = row[0]
-                break
+        # Pitch (first match wins — skip if user words already provided)
+        if not result["pitch_code"]:
+            for d in dicts:
+                if d["type"] not in ("pitch", "both"):
+                    continue
+                row = c.execute(
+                    "SELECT reading, position FROM pitch_accents "
+                    "WHERE expression=? AND dict_id=? LIMIT 1",
+                    (word, d["id"])
+                ).fetchone()
+                if row:
+                    result["pitch_code"] = _position_to_uf_code(row[1], row[0])
+                    if result["reading"] is None:
+                        result["reading"] = row[0]
+                    break
 
         # Definitions — collect ALL across all term dicts
-        all_defs = []
         for d in dicts:
             if d["type"] not in ("term", "both"):
                 continue
@@ -1173,16 +1194,15 @@ class _DictDB:
                     defs = json.loads(row[1])
                     meaningful = [x for x in defs if x.strip()]
                     for defn in meaningful:
-                        all_defs.append({
+                        result["all_definitions"].append({
                             "text": defn,
                             "dict_name": d["name"],
                         })
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        result["all_definitions"] = all_defs
-        if all_defs:
-            result["definition"] = all_defs[0]["text"]
+        if result["all_definitions"] and not result["definition"]:
+            result["definition"] = result["all_definitions"][0]["text"]
 
         return result
 
@@ -1195,6 +1215,64 @@ def _get_dict_db():
     if _dict_db is None:
         _dict_db = _DictDB()
     return _dict_db
+
+
+# ---------------------------------------------------------------------------
+# User Words — personal dictionary stored as JSON, highest priority
+# ---------------------------------------------------------------------------
+
+def _user_words_path():
+    """Path to user_words.json in user_files."""
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_files")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "user_words.json")
+
+
+def _load_user_words():
+    """Load the user words dict.  {word: {reading, pitch, tooltip}}."""
+    p = _user_words_path()
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_words(words):
+    """Persist the user words dict."""
+    p = _user_words_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+
+def _user_word_lookup(word):
+    """Look up a word in the user dictionary.
+
+    Returns None if not found, otherwise a result dict.
+    """
+    uw = _load_user_words()
+    entry = uw.get(word)
+    if not entry:
+        return None
+    return {
+        "reading": entry.get("reading") or None,
+        "pitch_code": entry.get("pitch") or None,
+        "definition": entry.get("tooltip") or None,
+    }
+
+
+def _save_user_word(word, reading, pitch, tooltip):
+    """Save or update a word in the user dictionary."""
+    uw = _load_user_words()
+    uw[word] = {
+        "reading": reading or "",
+        "pitch": pitch or "",
+        "tooltip": tooltip or "",
+    }
+    _save_user_words(uw)
 
 
 # ---------------------------------------------------------------------------
@@ -1237,19 +1315,12 @@ _mecab_available = None  # None = not checked, True/False
 
 _SUPPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "support")
 
-# ipadic node format: surface\tPOS\tlemma\treading  (tab-separated)
-_MECAB_NODE_FMT = r"%m\t%f[0]\t%f[6]\t%f[7]\n"
+# ipadic node format: surface\tPOS\tsub-POS\tlemma\treading  (tab-separated)
+_MECAB_NODE_FMT = r"%m\t%f[0]\t%f[1]\t%f[6]\t%f[7]\n"
 _MECAB_EOS_FMT = r"EOS\n"
-_MECAB_UNK_FMT = r"%m\t%m\t%m\t\n"
+_MECAB_UNK_FMT = r"%m\t%m\t*\t%m\t\n"
 
-# Particles and other words to skip during sentence annotation
-_SKIP_POS = {
-    "\u52a9\u8a5e",       # 助詞 — particles
-    "\u52a9\u52d5\u8a5e", # 助動詞 — auxiliary verbs
-    "\u8a18\u53f7",       # 記号 — symbols/punctuation
-    "\u7a7a\u767d",       # 空白 — whitespace
-    "\u88dc\u52a9\u8a18\u53f7",  # 補助記号 — supplementary symbols
-}
+# (Skip/merge POS logic is now inline in _merge_tokens using pos+pos2)
 
 
 def _mecab_cmd():
@@ -1350,9 +1421,13 @@ def _tokenize_sentence_raw(text):
         if not line or line == "EOS":
             break
         parts = line.split("\t")
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
-        surface, pos1, lemma, reading_kata = parts[0], parts[1], parts[2], parts[3]
+        surface = parts[0]
+        pos1 = parts[1]        # e.g. 動詞, 助詞, 助動詞, 名詞
+        pos2 = parts[2]        # e.g. 接続助詞, 自立, 非自立
+        lemma = parts[3]
+        reading_kata = parts[4]
         if not lemma or lemma == '*':
             lemma = surface
         reading_hira = _kata_to_hira(reading_kata) if reading_kata else surface
@@ -1361,55 +1436,64 @@ def _tokenize_sentence_raw(text):
             "lemma": lemma,
             "reading": reading_hira,
             "pos": pos1,
+            "pos2": pos2,
         })
     return tokens
 
 
-# POS tags that should be merged onto the preceding verb/adjective
-_MERGE_POS = {
-    "\u52a9\u52d5\u8a5e",  # 助動詞 — auxiliary verbs (e.g. ている, た, ない)
-}
-# POS tags that form compound verbs when sandwiched (e.g. て in 知っている)
-_TE_PARTICLES = {"\u3066", "\u3067", "\u3061\u3083"}  # て, で, ちゃ
-
-
 def _merge_tokens(tokens):
-    """Merge conjugation fragments into whole words.
+    """Merge conjugation fragments into whole words using POS/sub-POS.
 
-    E.g. 知っ(V) + て(助詞) + いる(V) → 知っている  (looked up as 知る)
-         食べ(V) + た(助動詞)       → 食べた      (looked up as 食べる)
-         走っ(V) + て(助詞) + いる(V) → 走っている  (looked up as 走る)
+    Uses MeCab's POS tags to decide what merges:
+    - 助動詞 (auxiliary verbs) always merge onto preceding verb/adj
+    - 助詞/接続助詞 (conjunctive particles like て/で) merge when
+      followed by a non-independent verb (動詞/非自立) or 助動詞
+
+    No surface forms are hardcoded — everything is driven by POS tags.
     """
     if not tokens:
         return tokens
+
+    cfg = _get_config()
+    skip_particles = cfg.get("skip_particles", True)
+
+    # POS tags that can start a merge chain
+    _HEAD_POS = {
+        "\u52d5\u8a5e",    # 動詞
+        "\u5f62\u5bb9\u8a5e",  # 形容詞
+        "\u5f62\u72b6\u8a5e",  # 形状詞 (形容動詞 stem)
+    }
 
     merged = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         # If this is a verb/adj, try to absorb following aux tokens
-        if tok["pos"] in ("\u52d5\u8a5e", "\u5f62\u5bb9\u8a5e",
-                          "\u5f62\u72b6\u8a5e"):  # 動詞, 形容詞, 形状詞
+        if tok["pos"] in _HEAD_POS:
             combined_surface = tok["surface"]
             combined_reading = tok["reading"]
             base_lemma = tok["lemma"]
             j = i + 1
             while j < len(tokens):
-                next_tok = tokens[j]
-                # Merge auxiliary verbs (助動詞): た, ない, れる, etc.
-                if next_tok["pos"] in _MERGE_POS:
-                    combined_surface += next_tok["surface"]
-                    combined_reading += next_tok["reading"]
+                nt = tokens[j]
+                # Rule 1: 助動詞 always merges (た, ない, れる, ます, です, etc.)
+                if nt["pos"] == "\u52a9\u52d5\u8a5e":  # 助動詞
+                    combined_surface += nt["surface"]
+                    combined_reading += nt["reading"]
                     j += 1
-                # Merge て/で particle + following verb (ている, てくれる, etc.)
-                elif (next_tok["pos"] == "\u52a9\u8a5e"  # 助詞
-                      and next_tok["surface"] in _TE_PARTICLES
+                # Rule 2: 接続助詞 (て/で/ちゃ) + non-independent verb/aux
+                elif (nt["pos"] == "\u52a9\u8a5e"  # 助詞
+                      and nt.get("pos2") == "\u63a5\u7d9a\u52a9\u8a5e"  # 接続助詞
                       and j + 1 < len(tokens)
-                      and tokens[j + 1]["pos"] in
-                      ("\u52d5\u8a5e",  # 動詞
-                       "\u52a9\u52d5\u8a5e")):  # 助動詞
-                    combined_surface += next_tok["surface"]
-                    combined_reading += next_tok["reading"]
+                      and (tokens[j + 1]["pos"] in
+                           ("\u52d5\u8a5e",       # 動詞
+                            "\u52a9\u52d5\u8a5e")  # 助動詞
+                           and tokens[j + 1].get("pos2") in
+                           ("\u975e\u81ea\u7acb",  # 非自立
+                            "*", None))):
+                    # Absorb the particle and the following verb/aux
+                    combined_surface += nt["surface"]
+                    combined_reading += nt["reading"]
                     combined_surface += tokens[j + 1]["surface"]
                     combined_reading += tokens[j + 1]["reading"]
                     j += 2
@@ -1420,21 +1504,42 @@ def _merge_tokens(tokens):
                 "lemma": base_lemma,
                 "reading": combined_reading,
                 "pos": tok["pos"],
+                "pos2": tok.get("pos2", "*"),
                 "skip": False,
             })
             i = j
         else:
-            skip = tok["pos"] in _SKIP_POS or not tok["surface"].strip()
-            if tok["surface"].strip() and all(
+            # Determine skip status
+            is_particle = tok["pos"] == "\u52a9\u8a5e"  # 助詞
+            is_aux_verb = tok["pos"] == "\u52a9\u52d5\u8a5e"  # 助動詞
+            is_symbol = tok["pos"] in (
+                "\u8a18\u53f7",  # 記号
+                "\u7a7a\u767d",  # 空白
+                "\u88dc\u52a9\u8a18\u53f7",  # 補助記号
+            )
+            is_empty = not tok["surface"].strip()
+            # ASCII/fullwidth-only tokens (punctuation, roman)
+            is_non_jp = (tok["surface"].strip() and all(
                 ord(c) < 0x3000 or ord(c) in range(0xFF01, 0xFF5F)
                 for c in tok["surface"].strip()
-            ):
+            ))
+
+            if is_symbol or is_empty or is_non_jp:
                 skip = True
+            elif is_particle and skip_particles:
+                skip = True
+            elif is_aux_verb:
+                # Standalone 助動詞 that didn't merge (rare) — skip
+                skip = True
+            else:
+                skip = False
+
             merged.append({
                 "surface": tok["surface"],
                 "lemma": tok["lemma"],
                 "reading": tok["reading"],
                 "pos": tok["pos"],
+                "pos2": tok.get("pos2", "*"),
                 "skip": skip,
             })
             i += 1
@@ -1568,6 +1673,8 @@ def _handle_lookup_result(editor, selected_text):
         editor.parentWindow, selected_text, result
     )
     if dialog.exec():
+        # Save user edits to user_words.json
+        dialog.save_user_edit()
         annotation = dialog.get_annotation()
         if annotation and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
@@ -1599,10 +1706,18 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
             })
             continue
 
-        # Try surface form first, then lemma (use lookup_all for defs)
+        # Try surface form first
         result = db.lookup_all(tok["surface"])
-        if not result["reading"] and not result["pitch_code"]:
-            result = db.lookup_all(tok["lemma"])
+
+        # If no match on surface, try the lemma (dictionary form)
+        # but only if lemma is different from surface
+        used_lemma = False
+        if (not result["reading"] and not result["pitch_code"]
+                and tok["lemma"] != tok["surface"]):
+            lemma_result = db.lookup_all(tok["lemma"])
+            if lemma_result["reading"] or lemma_result["pitch_code"]:
+                result = lemma_result
+                used_lemma = True
 
         # If still no reading from DB, use MeCab's reading
         if not result["reading"] and tok["reading"]:
@@ -1619,6 +1734,7 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
             "skip": False,
             "result": result,
             "enabled": has_data,
+            "used_lemma": used_lemma,
         })
 
     # Check if we found anything at all
@@ -1638,6 +1754,8 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
         editor.parentWindow, sentence, word_results
     )
     if dialog.exec():
+        # Save any user edits to user_words.json
+        dialog.save_user_edits()
         annotated = dialog.get_annotated_sentence()
         if annotated and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
@@ -1648,16 +1766,19 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
 
 
 class _SentenceLookupDialog(QDialog):
-    """Preview dialog for sentence-mode lookup.
+    """Sentence-mode lookup dialog.
 
-    Shows each tokenized word with reading / pitch / definition selector.
-    User can enable/disable and edit each word before inserting.
+    Columns: \u2713 | Word | Dictionary | Reading | Pitch | Tooltip
+    - Dictionary is a dropdown of available definitions (from all dicts).
+      Changing it populates the Tooltip field.
+    - Reading, Pitch, Tooltip are editable inline.
+    - On Insert, any word the user edited is saved to user_words.json.
     """
 
     def __init__(self, parent, sentence, word_results):
         super().__init__(parent)
         self.setWindowTitle("Sentence Lookup")
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(820)
         self.setMinimumHeight(400)
         self.sentence = sentence
         self.word_results = word_results
@@ -1669,13 +1790,13 @@ class _SentenceLookupDialog(QDialog):
 
         info = QLabel(
             "<b>Sentence mode:</b> check the words you want to "
-            "annotate, edit as needed, then click Insert."
+            "annotate, edit reading / pitch / tooltip, then click Insert."
         )
         info.setWordWrap(True)
         info.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(info)
 
-        # Scrollable word list
+        # Scrollable word grid
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll_widget = QWidget()
@@ -1683,9 +1804,8 @@ class _SentenceLookupDialog(QDialog):
         grid.setContentsMargins(4, 4, 4, 4)
 
         # Headers
-        for col, hdr in enumerate(
-            ["\u2713", "Word", "Reading", "Pitch", "Definition"]
-        ):
+        headers = ["\u2713", "Word", "Dictionary", "Reading", "Pitch", "Tooltip"]
+        for col, hdr in enumerate(headers):
             lbl = QLabel("<b>%s</b>" % hdr)
             lbl.setTextFormat(Qt.TextFormat.RichText)
             grid.addWidget(lbl, 0, col)
@@ -1699,106 +1819,80 @@ class _SentenceLookupDialog(QDialog):
             cb.setChecked(w["enabled"])
 
             surface_lbl = QLabel(w["surface"])
-            surface_lbl.setToolTip(
-                "Dictionary form: %s" % w["lemma"]
-            )
+            font = surface_lbl.font()
+            font.setBold(True)
+            surface_lbl.setFont(font)
+            if w["lemma"] != w["surface"]:
+                surface_lbl.setToolTip(
+                    "Dictionary form: %s" % w["lemma"]
+                )
 
             result = w["result"] or {}
+            all_defs = result.get("all_definitions") or []
+            first_def = result.get("definition") or ""
+
+            # Dictionary dropdown (shows [DictName] definition)
+            dict_combo = QComboBox()
+            dict_combo.setMinimumWidth(180)
+            dict_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            if all_defs:
+                for d in all_defs:
+                    label = d["text"]
+                    if len(label) > 60:
+                        label = label[:57] + "..."
+                    src = d.get("dict_name", "")
+                    if src:
+                        label = "[%s] %s" % (src, label)
+                    dict_combo.addItem(label, d["text"])
+            dict_combo.addItem("(none)")
+
+            # Reading / Pitch / Tooltip fields
             reading_edit = QLineEdit(result.get("reading") or "")
             reading_edit.setPlaceholderText("reading")
             reading_edit.setMaximumWidth(120)
 
             pitch_edit = QLineEdit(result.get("pitch_code") or "")
             pitch_edit.setPlaceholderText("h/a/o/nX")
-            pitch_edit.setMaximumWidth(60)
+            pitch_edit.setMaximumWidth(70)
 
-            # Definition: use a combo box if multiple definitions exist,
-            # otherwise fall back to a plain QLineEdit.
-            all_defs = result.get("all_definitions") or []
-            first_def = result.get("definition") or ""
-            def_combo = None
-            def_edit = None
+            tooltip_edit = QLineEdit(first_def)
+            tooltip_edit.setPlaceholderText("tooltip text")
 
-            if len(all_defs) > 1:
-                # Combo box with all defs, plus "(Custom)" option
-                def_combo = QComboBox()
-                def_combo.setMinimumWidth(200)
-                def_combo.setSizeAdjustPolicy(
-                    QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-                )
-                for idx, d in enumerate(all_defs):
-                    label = d["text"]
-                    if len(label) > 80:
-                        label = label[:77] + "..."
-                    src = d.get("dict_name", "")
-                    if src:
-                        label = "[%s] %s" % (src, label)
-                    def_combo.addItem(label, d["text"])
-                def_combo.addItem("(Custom...)")
-                # Also add a hidden line edit for custom input
-                def_edit = QLineEdit(first_def)
-                def_edit.setPlaceholderText("custom definition")
-                def_edit.setVisible(False)
-                # When user picks "(Custom...)", show the line edit
-                def _on_combo_change(index, combo=def_combo, edit=def_edit):
-                    if index == combo.count() - 1:  # last item = Custom
-                        edit.setVisible(True)
-                        edit.setFocus()
-                    else:
-                        edit.setVisible(False)
-                def_combo.currentIndexChanged.connect(_on_combo_change)
-
-                # Wrap combo + edit in a layout
-                def_widget = QWidget()
-                def_layout = QVBoxLayout(def_widget)
-                def_layout.setContentsMargins(0, 0, 0, 0)
-                def_layout.setSpacing(2)
-                def_layout.addWidget(def_combo)
-                def_layout.addWidget(def_edit)
-                grid.addWidget(def_widget, row_num, 4)
-            else:
-                def_edit = QLineEdit(first_def)
-                def_edit.setPlaceholderText("definition")
-                grid.addWidget(def_edit, row_num, 4)
+            # When dictionary selection changes, populate tooltip
+            def _on_dict_change(index, combo=dict_combo, tip=tooltip_edit):
+                data = combo.currentData()
+                if data:  # not the "(none)" entry
+                    tip.setText(data)
+            dict_combo.currentIndexChanged.connect(_on_dict_change)
 
             grid.addWidget(cb, row_num, 0)
             grid.addWidget(surface_lbl, row_num, 1)
-            grid.addWidget(reading_edit, row_num, 2)
-            grid.addWidget(pitch_edit, row_num, 3)
+            grid.addWidget(dict_combo, row_num, 2)
+            grid.addWidget(reading_edit, row_num, 3)
+            grid.addWidget(pitch_edit, row_num, 4)
+            grid.addWidget(tooltip_edit, row_num, 5)
 
             self._rows.append({
                 "surface": w["surface"],
+                "lemma": w["lemma"],
                 "cb": cb,
+                "dict_combo": dict_combo,
                 "reading": reading_edit,
                 "pitch": pitch_edit,
-                "def_combo": def_combo,
-                "def_edit": def_edit,
+                "tooltip": tooltip_edit,
+                # Remember original values to detect user edits
+                "orig_reading": result.get("reading") or "",
+                "orig_pitch": result.get("pitch_code") or "",
+                "orig_tooltip": first_def,
             })
             row_num += 1
 
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
 
-        # Preview
-        self.preview_label = QLabel()
-        self.preview_label.setWordWrap(True)
-        self.preview_label.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(self.preview_label)
-
-        # Connect signals for live preview
-        for r in self._rows:
-            r["cb"].stateChanged.connect(self._update_preview)
-            r["reading"].textChanged.connect(self._update_preview)
-            r["pitch"].textChanged.connect(self._update_preview)
-            if r["def_combo"]:
-                r["def_combo"].currentIndexChanged.connect(
-                    self._update_preview
-                )
-            if r["def_edit"]:
-                r["def_edit"].textChanged.connect(self._update_preview)
-        self._update_preview()
-
-        # Buttons
+        # Buttons (no preview)
         bl = QHBoxLayout()
         bl.addStretch()
         cancel_btn = QPushButton("Cancel")
@@ -1810,28 +1904,21 @@ class _SentenceLookupDialog(QDialog):
         bl.addWidget(insert_btn)
         layout.addLayout(bl)
 
-    @staticmethod
-    def _get_def_text(row):
-        """Get the active definition text from a row."""
-        combo = row.get("def_combo")
-        edit = row.get("def_edit")
-        if combo is not None:
-            # If user picked "(Custom...)" (last item), use line edit
-            if combo.currentIndex() == combo.count() - 1:
-                return edit.text().strip() if edit else ""
-            data = combo.currentData()
-            return data.strip() if data else ""
-        if edit is not None:
-            return edit.text().strip()
-        return ""
-
-    def _update_preview(self, *_args):
-        annotated = self.get_annotated_sentence()
-        if annotated:
-            safe = annotated.replace("<", "&lt;").replace(">", "&gt;")
-            self.preview_label.setText(
-                "<b>Preview:</b> <code>%s</code>" % safe
+    def save_user_edits(self):
+        """Save any row where the user changed reading/pitch/tooltip."""
+        for r in self._rows:
+            if not r["cb"].isChecked():
+                continue
+            reading = r["reading"].text().strip()
+            pitch = r["pitch"].text().strip()
+            tooltip = r["tooltip"].text().strip()
+            changed = (
+                reading != r["orig_reading"]
+                or pitch != r["orig_pitch"]
+                or tooltip != r["orig_tooltip"]
             )
+            if changed and (reading or pitch or tooltip):
+                _save_user_word(r["surface"], reading, pitch, tooltip)
 
     def get_annotated_sentence(self):
         """Build annotated sentence, walking token-by-token.
@@ -1846,11 +1933,11 @@ class _SentenceLookupDialog(QDialog):
                 continue
             reading = r["reading"].text().strip()
             pitch = r["pitch"].text().strip()
-            definition = self._get_def_text(r)
+            tooltip = r["tooltip"].text().strip()
             result = {
                 "reading": reading or None,
                 "pitch_code": pitch or None,
-                "definition": definition or None,
+                "definition": tooltip or None,
             }
             ann = _build_annotation(r["surface"], result)
             if ann:
@@ -1873,13 +1960,9 @@ class _SentenceLookupDialog(QDialog):
                 if surf in used:
                     continue
                 if text[pos:pos + len(surf)] == surf:
-                    # Add space separator if there's preceding content
-                    # (but not if previous char is already a space)
                     if out_parts and not out_parts[-1].endswith(" "):
                         out_parts.append(" ")
                     out_parts.append(replacements[surf])
-                    # Also add a trailing space so the next char
-                    # doesn't glue to the annotation's closing }
                     out_parts.append(" ")
                     pos += len(surf)
                     used.add(surf)
@@ -1974,6 +2057,18 @@ class _LookupPreviewDialog(QDialog):
             self.preview_label.setText(
                 "<b>Preview:</b> <i>(no annotation)</i>"
             )
+
+    def save_user_edit(self):
+        """Save user edits to user_words.json if anything was changed."""
+        reading = self.reading_edit.text().strip()
+        pitch = self.pitch_edit.text().strip()
+        tooltip = self.def_edit.toPlainText().strip()
+        orig_r = (self.result.get("reading") or "")
+        orig_p = (self.result.get("pitch_code") or "")
+        orig_d = (self.result.get("definition") or "")
+        changed = (reading != orig_r or pitch != orig_p or tooltip != orig_d)
+        if changed and (reading or pitch or tooltip):
+            _save_user_word(self.word, reading, pitch, tooltip)
 
     def get_annotation(self):
         reading = self.reading_edit.text().strip()
@@ -2136,6 +2231,119 @@ class _DictManagerWidget(QWidget):
 # ---------------------------------------------------------------------------
 # Settings dialog
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# User Words manager widget (for settings dialog)
+# ---------------------------------------------------------------------------
+
+class _UserWordsManagerWidget(QWidget):
+    """Widget for viewing/editing/adding user words."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+        self._refresh_list()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.word_list = QListWidget()
+        self.word_list.setMinimumHeight(200)
+        self.word_list.currentItemChanged.connect(self._on_select)
+        layout.addWidget(self.word_list)
+
+        # Edit area
+        edit_group = QGroupBox("Edit Word")
+        eg = QGridLayout(edit_group)
+        eg.addWidget(QLabel("Word:"), 0, 0)
+        self.word_edit = QLineEdit()
+        eg.addWidget(self.word_edit, 0, 1)
+        eg.addWidget(QLabel("Reading:"), 1, 0)
+        self.reading_edit = QLineEdit()
+        self.reading_edit.setPlaceholderText("hiragana reading")
+        eg.addWidget(self.reading_edit, 1, 1)
+        eg.addWidget(QLabel("Pitch:"), 2, 0)
+        self.pitch_edit = QLineEdit()
+        self.pitch_edit.setPlaceholderText("h / a / o / nX")
+        eg.addWidget(self.pitch_edit, 2, 1)
+        eg.addWidget(QLabel("Tooltip:"), 3, 0)
+        self.tooltip_edit = QLineEdit()
+        self.tooltip_edit.setPlaceholderText("definition or notes")
+        eg.addWidget(self.tooltip_edit, 3, 1)
+        layout.addWidget(edit_group)
+
+        bl = QHBoxLayout()
+        add_btn = QPushButton("Add / Update")
+        add_btn.clicked.connect(self._on_add)
+        bl.addWidget(add_btn)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._on_remove)
+        bl.addWidget(remove_btn)
+        bl.addStretch()
+        layout.addLayout(bl)
+
+    def _refresh_list(self):
+        self.word_list.clear()
+        uw = _load_user_words()
+        for word, entry in sorted(uw.items()):
+            parts = []
+            if entry.get("reading"):
+                parts.append(entry["reading"])
+            if entry.get("pitch"):
+                parts.append(entry["pitch"])
+            if entry.get("tooltip"):
+                tip = entry["tooltip"]
+                if len(tip) > 40:
+                    tip = tip[:37] + "..."
+                parts.append(tip)
+            label = "%s  \u2014  %s" % (word, "; ".join(parts)) if parts else word
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, word)
+            self.word_list.addItem(item)
+
+    def _on_select(self, current, _prev):
+        if not current:
+            return
+        word = current.data(Qt.ItemDataRole.UserRole)
+        uw = _load_user_words()
+        entry = uw.get(word, {})
+        self.word_edit.setText(word)
+        self.reading_edit.setText(entry.get("reading", ""))
+        self.pitch_edit.setText(entry.get("pitch", ""))
+        self.tooltip_edit.setText(entry.get("tooltip", ""))
+
+    def _on_add(self):
+        word = self.word_edit.text().strip()
+        if not word:
+            QMessageBox.warning(self, "No word", "Enter a word first.")
+            return
+        reading = self.reading_edit.text().strip()
+        pitch = self.pitch_edit.text().strip()
+        tooltip = self.tooltip_edit.text().strip()
+        _save_user_word(word, reading, pitch, tooltip)
+        self._refresh_list()
+
+    def _on_remove(self):
+        item = self.word_list.currentItem()
+        if not item:
+            return
+        word = item.data(Qt.ItemDataRole.UserRole)
+        reply = QMessageBox.question(
+            self, "Remove Word",
+            "Remove \u201c%s\u201d from user words?" % word,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            uw = _load_user_words()
+            uw.pop(word, None)
+            _save_user_words(uw)
+            self._refresh_list()
+            self.word_edit.clear()
+            self.reading_edit.clear()
+            self.pitch_edit.clear()
+            self.tooltip_edit.clear()
+
 
 class _ColorButton(QPushButton):
     """A button that shows its color and opens a color picker on click."""
@@ -2376,18 +2584,44 @@ class SettingsDialog(QDialog):
             "Highlight a sentence in the card editor and "
             "press <b>Ctrl+Shift+F</b>. The add-on will "
             "tokenize the sentence with MeCab, look up each "
-            "content word (skipping particles), handle "
-            "conjugated forms, and show a preview where you "
-            "can check/uncheck which words to annotate."
+            "content word, handle conjugated forms, and show "
+            "a dialog where you can check/uncheck which words "
+            "to annotate."
         )
         mecab_desc.setTextFormat(Qt.TextFormat.RichText)
         mecab_desc.setWordWrap(True)
         mecab_layout.addWidget(mecab_desc)
 
+        self.skip_particles_cb = QCheckBox(
+            "Skip particles (\u52a9\u8a5e) like \u306e, \u306b, \u3092, \u304c, etc."
+        )
+        self.skip_particles_cb.setChecked(
+            self.cfg.get("skip_particles", True)
+        )
+        mecab_layout.addWidget(self.skip_particles_cb)
+
         dict_layout.addWidget(mecab_group)
         dict_layout.addStretch()
 
         tabs.addTab(dict_tab, "Dictionary Lookup")
+
+        # ---- Tab 3: User Words ----
+        uw_tab = QWidget()
+        uw_layout = QVBoxLayout(uw_tab)
+
+        uw_info = QLabel(
+            "Words you edit in the lookup dialogs are automatically "
+            "saved here. User words have the <b>highest priority</b> "
+            "\u2014 they override all imported dictionaries.\n\n"
+            "You can also add or edit words manually below."
+        )
+        uw_info.setWordWrap(True)
+        uw_layout.addWidget(uw_info)
+
+        self._uw_manager = _UserWordsManagerWidget()
+        uw_layout.addWidget(self._uw_manager)
+
+        tabs.addTab(uw_tab, "User Words")
 
         # -- Buttons (below tabs) --
         btn_layout = QHBoxLayout()
@@ -2417,6 +2651,7 @@ class SettingsDialog(QDialog):
         self.cfg["enabled"] = self.enabled_cb.isChecked()
         self.cfg["pitch_accent_enabled"] = self.pitch_cb.isChecked()
         self.cfg["furigana_font_size"] = round(self.font_spin.value(), 2)
+        self.cfg["skip_particles"] = self.skip_particles_cb.isChecked()
         for key, btn in self._color_buttons.items():
             self.cfg[key] = btn.color()
 
