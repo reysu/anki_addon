@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10)
+Universal Furigana Add-on for Anki (v10d)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -390,7 +390,7 @@ _SCRIPT_TEMPLATE = r"""
             var tid = this.getAttribute('data-uf-tt');
             var p = document.getElementById(tid);
             if (!p) return;
-            if (p.style.display === 'block') {
+            if (p.classList.contains('uf-tt-visible')) {
                 hidePopup(this);
             } else {
                 hideAllPopups();
@@ -454,47 +454,46 @@ _SCRIPT_TEMPLATE = r"""
         if (!popup) return;
         popup.setAttribute('data-page', '0');
         renderPage(popup);
-        // Use fixed positioning relative to viewport — no layout impact
-        popup.style.display = 'block';
-        popup.style.position = 'fixed';
+        // Read element rect first (batch DOM reads before writes)
         var elRect = el.getBoundingClientRect();
+        // Make visible at a temp position so we can measure
+        popup.style.left = '-9999px';
+        popup.style.top = '-9999px';
+        popup.classList.add('uf-tt-visible');
+        // Now measure popup size and position properly
+        var pW = popup.offsetWidth;
+        var pH = popup.offsetHeight;
         var left = elRect.left;
         var top = elRect.bottom + 2;
-        popup.style.left = left + 'px';
-        popup.style.top = top + 'px';
-        // Measure and clamp to viewport
-        var pRect = popup.getBoundingClientRect();
         // Clamp right edge
-        if (pRect.right > window.innerWidth - 4) {
-            popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
+        if (left + pW > window.innerWidth - 4) {
+            left = Math.max(4, window.innerWidth - pW - 4);
         }
         // Clamp left edge
-        pRect = popup.getBoundingClientRect();
-        if (pRect.left < 4) {
-            popup.style.left = '4px';
-        }
+        if (left < 4) left = 4;
         // If overflows bottom, show above the word instead
-        pRect = popup.getBoundingClientRect();
-        if (pRect.bottom > window.innerHeight) {
-            popup.style.top = (elRect.top - pRect.height - 2) + 'px';
+        if (top + pH > window.innerHeight) {
+            top = elRect.top - pH - 2;
         }
+        popup.style.left = left + 'px';
+        popup.style.top = top + 'px';
     }
 
     function hidePopup(el) {
         var popup = getPopupForEl(el);
         if (popup) {
-            popup.style.display = 'none';
-            popup.style.left = '';
-            popup.style.top = '';
+            popup.classList.remove('uf-tt-visible');
+            popup.style.left = '-9999px';
+            popup.style.top = '-9999px';
         }
     }
 
     function hideAllPopups() {
-        var popups = document.getElementsByClassName('uf-tooltip');
+        var popups = document.querySelectorAll('.uf-tt-visible');
         for (var i = 0; i < popups.length; i++) {
-            popups[i].style.display = 'none';
-            popups[i].style.left = '';
-            popups[i].style.top = '';
+            popups[i].classList.remove('uf-tt-visible');
+            popups[i].style.left = '-9999px';
+            popups[i].style.top = '-9999px';
         }
     }
 
@@ -623,12 +622,12 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
-.uf-has-info { cursor: help; }
-#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
+.uf-has-info { /* no cursor change — avoids Qt WebEngine reflow on ruby elements */ }
+#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; contain: layout style; }
 .uf-info-dot {
     font-size: 0.55em;
     opacity: 0.35;
-    cursor: help;
+    cursor: pointer;
     vertical-align: super;
     line-height: 0;
     pointer-events: none;
@@ -641,8 +640,10 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     font-size: 0.7em;
 }
 .uf-tooltip {
-    display: none;
+    visibility: hidden;
     position: fixed;
+    top: -9999px;
+    left: -9999px;
     z-index: 99999;
     background: #2a2a3e;
     color: #ddd;
@@ -656,9 +657,13 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     max-height: 30vh;
     overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: auto;
+    pointer-events: none;
     white-space: normal;
     word-wrap: break-word;
+}
+.uf-tooltip.uf-tt-visible {
+    visibility: visible;
+    pointer-events: auto;
 }
 .uf-tt-nav {
     display: flex;
