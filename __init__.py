@@ -29,11 +29,7 @@ Author: Eric Su (reysu)
 import json
 import os
 import re
-import shutil
 import sqlite3
-import subprocess
-import sys
-import threading
 from aqt import mw, gui_hooks
 from aqt.editor import Editor
 from aqt.qt import (
@@ -44,16 +40,6 @@ from aqt.qt import (
     QProgressDialog, QApplication, QLineEdit, QTextEdit,
     QTabWidget
 )
-
-# ---------------------------------------------------------------------------
-# Vendor directory — bundled / installed dependencies live here
-# ---------------------------------------------------------------------------
-
-_ADDON_DIR = os.path.dirname(os.path.abspath(__file__))
-_VENDOR_DIR = os.path.join(_ADDON_DIR, "vendor")
-
-if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
-    sys.path.insert(0, _VENDOR_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,14 +1186,10 @@ _SKIP_POS = {
 }
 
 
-def _check_mecab(force=False):
-    """Check if fugashi + unidic-lite are importable.
-
-    Args:
-        force: If True, ignore cached result and re-check.
-    """
+def _check_mecab():
+    """Check if fugashi + unidic-lite are importable."""
     global _mecab_available
-    if _mecab_available is not None and not force:
+    if _mecab_available is not None:
         return _mecab_available
     try:
         from fugashi import Tagger as _T
@@ -1226,99 +1208,6 @@ def _get_mecab():
         _mecab_tagger = Tagger()
     return _mecab_tagger
 
-
-def _install_mecab(progress_callback=None):
-    """Install fugashi + unidic-lite into the vendor directory.
-
-    Uses Anki's bundled Python + pip to install into a local vendor
-    folder so no system-level install is needed.
-
-    Args:
-        progress_callback: Optional callable(str) for status updates.
-
-    Returns:
-        (success: bool, message: str)
-    """
-    global _mecab_available, _mecab_tagger
-
-    os.makedirs(_VENDOR_DIR, exist_ok=True)
-
-    # Ensure vendor dir is on sys.path
-    if _VENDOR_DIR not in sys.path:
-        sys.path.insert(0, _VENDOR_DIR)
-
-    python = sys.executable
-    cmd = [
-        python, "-m", "pip", "install",
-        "--target", _VENDOR_DIR,
-        "--no-user",
-        "--upgrade",
-        "fugashi", "unidic-lite",
-    ]
-
-    if progress_callback:
-        progress_callback("Downloading fugashi + unidic-lite...\n"
-                          "(This may take a minute \u2014 unidic-lite is ~200 MB)")
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 minute timeout
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            return False, f"pip install failed:\n{err}"
-    except FileNotFoundError:
-        return False, (
-            "Could not find Python/pip.\n\n"
-            "Try running this in a terminal instead:\n"
-            f"  {python} -m pip install --target "
-            f"\"{_VENDOR_DIR}\" fugashi unidic-lite"
-        )
-    except subprocess.TimeoutExpired:
-        return False, "Installation timed out (10 min). Please try again."
-    except Exception as e:
-        return False, f"Unexpected error: {e}"
-
-    # Reset cached state so the new install is detected
-    _mecab_available = None
-    _mecab_tagger = None
-
-    if _check_mecab(force=True):
-        return True, "MeCab installed successfully! Sentence mode is now available."
-    else:
-        return False, (
-            "Packages were installed but MeCab could not be loaded.\n"
-            "You may need to restart Anki."
-        )
-
-
-def _uninstall_mecab():
-    """Remove the vendor directory to uninstall MeCab.
-
-    Returns:
-        (success: bool, message: str)
-    """
-    global _mecab_available, _mecab_tagger
-
-    if not os.path.isdir(_VENDOR_DIR):
-        return True, "Nothing to uninstall."
-
-    try:
-        shutil.rmtree(_VENDOR_DIR)
-    except Exception as e:
-        return False, f"Could not remove vendor directory:\n{e}"
-
-    _mecab_available = None
-    _mecab_tagger = None
-
-    # Remove from sys.path
-    if _VENDOR_DIR in sys.path:
-        sys.path.remove(_VENDOR_DIR)
-
-    return True, "MeCab uninstalled. Sentence mode is disabled."
 
 
 def _tokenize_sentence(text):
@@ -1475,8 +1364,11 @@ def _handle_lookup_result(editor, selected_text):
         if not _check_mecab():
             msg += (
                 "\n\nFor sentence mode, install MeCab via:\n"
-                "  Tools \u2192 Universal Furigana Settings \u2192 "
-                "Dictionary Lookup \u2192 Install MeCab"
+                "  Help \u2192 Debug Console, then paste:\n"
+                "  import subprocess, sys; subprocess.check_call("
+                "[sys.executable, '-m', 'pip', 'install', "
+                "'fugashi', 'unidic-lite'])\n\n"
+                "Then restart Anki."
             )
         else:
             msg += (
@@ -2190,29 +2082,49 @@ class SettingsDialog(QDialog):
         )
         mecab_layout = QVBoxLayout(mecab_group)
 
-        self._mecab_status_label = QLabel()
-        self._mecab_status_label.setTextFormat(Qt.TextFormat.RichText)
-        self._mecab_status_label.setWordWrap(True)
-        mecab_layout.addWidget(self._mecab_status_label)
+        mecab_status = (
+            "\u2705 MeCab is installed and working."
+            if _check_mecab()
+            else "\u274C MeCab is <b>not installed</b>. "
+                 "Sentence mode requires <code>fugashi</code> "
+                 "+ <code>unidic-lite</code>."
+        )
+        mecab_label = QLabel(mecab_status)
+        mecab_label.setTextFormat(Qt.TextFormat.RichText)
+        mecab_label.setWordWrap(True)
+        mecab_layout.addWidget(mecab_label)
 
-        self._mecab_desc_label = QLabel()
-        self._mecab_desc_label.setTextFormat(Qt.TextFormat.RichText)
-        self._mecab_desc_label.setWordWrap(True)
-        mecab_layout.addWidget(self._mecab_desc_label)
-
-        mecab_btn_layout = QHBoxLayout()
-        self._mecab_install_btn = QPushButton("Install MeCab")
-        self._mecab_install_btn.clicked.connect(self._on_install_mecab)
-        mecab_btn_layout.addWidget(self._mecab_install_btn)
-
-        self._mecab_uninstall_btn = QPushButton("Uninstall MeCab")
-        self._mecab_uninstall_btn.clicked.connect(self._on_uninstall_mecab)
-        mecab_btn_layout.addWidget(self._mecab_uninstall_btn)
-
-        mecab_btn_layout.addStretch()
-        mecab_layout.addLayout(mecab_btn_layout)
-
-        self._update_mecab_ui()
+        if not _check_mecab():
+            install_info = QLabel(
+                "Sentence mode is optional. To enable it, "
+                "open Anki\u2019s debug console "
+                "(<b>Help \u2192 Debug Console</b>) and paste:"
+                "<br><br>"
+                "<code>import subprocess, sys; "
+                "subprocess.check_call([sys.executable, "
+                "'-m', 'pip', 'install', "
+                "'fugashi', 'unidic-lite'])</code>"
+                "<br><br>"
+                "Then restart Anki."
+            )
+            install_info.setTextFormat(Qt.TextFormat.RichText)
+            install_info.setWordWrap(True)
+            install_info.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            mecab_layout.addWidget(install_info)
+        else:
+            mecab_desc = QLabel(
+                "Highlight a sentence in the card editor and "
+                "press <b>Ctrl+Shift+F</b>. The add-on will "
+                "tokenize the sentence with MeCab, look up each "
+                "content word (skipping particles), handle "
+                "conjugated forms, and show a preview where you "
+                "can check/uncheck which words to annotate."
+            )
+            mecab_desc.setTextFormat(Qt.TextFormat.RichText)
+            mecab_desc.setWordWrap(True)
+            mecab_layout.addWidget(mecab_desc)
 
         dict_layout.addWidget(mecab_group)
         dict_layout.addStretch()
@@ -2263,97 +2175,6 @@ class SettingsDialog(QDialog):
         _inject_templates(self.cfg)
 
         self.accept()
-
-    def _update_mecab_ui(self):
-        """Refresh MeCab status label and button visibility."""
-        installed = _check_mecab(force=True)
-        if installed:
-            self._mecab_status_label.setText(
-                "\u2705 MeCab is installed and working."
-            )
-            self._mecab_desc_label.setText(
-                "Highlight a sentence in the card editor and "
-                "press <b>Ctrl+Shift+F</b>. The add-on will "
-                "tokenize the sentence with MeCab, look up each "
-                "content word (skipping particles), handle "
-                "conjugated forms, and show a preview where you "
-                "can check/uncheck which words to annotate."
-            )
-            self._mecab_install_btn.setVisible(False)
-            self._mecab_uninstall_btn.setVisible(True)
-        else:
-            self._mecab_status_label.setText(
-                "\u274C MeCab is <b>not installed</b>. "
-                "Sentence mode requires MeCab to tokenize "
-                "Japanese sentences."
-            )
-            self._mecab_desc_label.setText(
-                "Click <b>Install MeCab</b> to automatically "
-                "download and set up MeCab (fugashi + unidic-lite). "
-                "This is a one-time download of ~200 MB. "
-                "Once installed, you can highlight entire sentences "
-                "and the add-on will parse each word."
-            )
-            self._mecab_install_btn.setVisible(True)
-            self._mecab_uninstall_btn.setVisible(False)
-
-    def _on_install_mecab(self):
-        """Install MeCab in a background thread with progress dialog."""
-        self._mecab_install_btn.setEnabled(False)
-        self._mecab_install_btn.setText("Installing...")
-
-        progress = QProgressDialog(
-            "Downloading MeCab (fugashi + unidic-lite)...\n"
-            "This may take a minute or two (~200 MB download).",
-            None,  # no cancel button
-            0, 0,  # indeterminate
-            self,
-        )
-        progress.setWindowTitle("Installing MeCab")
-        progress.setMinimumDuration(0)
-        progress.show()
-        QApplication.processEvents()
-
-        def _do_install():
-            return _install_mecab()
-
-        def _on_done(result):
-            progress.close()
-            success, message = result
-            if success:
-                QMessageBox.information(self, "MeCab Installed", message)
-            else:
-                QMessageBox.warning(self, "Installation Failed", message)
-            self._mecab_install_btn.setEnabled(True)
-            self._mecab_install_btn.setText("Install MeCab")
-            self._update_mecab_ui()
-
-        # Run in thread to avoid freezing the UI
-        def _thread_target():
-            result = _do_install()
-            # Schedule UI update on main thread
-            mw.taskman.run_on_main(lambda: _on_done(result))
-
-        t = threading.Thread(target=_thread_target, daemon=True)
-        t.start()
-
-    def _on_uninstall_mecab(self):
-        """Uninstall MeCab (remove vendor directory)."""
-        reply = QMessageBox.question(
-            self,
-            "Uninstall MeCab",
-            "Remove MeCab and disable sentence mode?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        success, message = _uninstall_mecab()
-        if success:
-            QMessageBox.information(self, "MeCab Uninstalled", message)
-        else:
-            QMessageBox.warning(self, "Uninstall Failed", message)
-        self._update_mecab_ui()
 
     def _on_restore(self):
         self.cfg = dict(_DEFAULT_CONFIG)
