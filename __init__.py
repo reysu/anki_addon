@@ -1213,23 +1213,31 @@ class _DictDB:
 
         dicts = self.get_dictionaries()
 
-        # Pitch (first match wins — skip if user words already provided)
-        if not result["pitch_code"]:
-            for d in dicts:
-                if d["type"] not in ("pitch", "both"):
-                    continue
-                row = c.execute(
-                    "SELECT reading, position FROM pitch_accents "
-                    "WHERE expression=? AND dict_id=? LIMIT 1",
-                    (word, d["id"])
-                ).fetchone()
-                if row:
-                    result["pitch_code"] = _position_to_uf_code(row[1], row[0])
-                    if result["reading"] is None:
-                        result["reading"] = row[0]
-                    break
+        # Pitch — build a cache of reading → pitch_code for this word,
+        # then pick the first match as default
+        pitch_by_reading = {}  # reading -> pitch_code
+        for d in dicts:
+            if d["type"] not in ("pitch", "both"):
+                continue
+            rows = c.execute(
+                "SELECT reading, position FROM pitch_accents "
+                "WHERE expression=? AND dict_id=?",
+                (word, d["id"])
+            ).fetchall()
+            for row in rows:
+                rdg = row[0]
+                if rdg and rdg not in pitch_by_reading:
+                    pitch_by_reading[rdg] = _position_to_uf_code(
+                        row[1], rdg
+                    )
+        if not result["pitch_code"] and pitch_by_reading:
+            first_rdg = next(iter(pitch_by_reading))
+            result["pitch_code"] = pitch_by_reading[first_rdg]
+            if result["reading"] is None:
+                result["reading"] = first_rdg
 
         # Definitions — collect ALL across all term dicts
+        # Also store per-entry reading + pitch so switching dicts updates all
         for d in dicts:
             if d["type"] not in ("term", "both"):
                 continue
@@ -1240,15 +1248,21 @@ class _DictDB:
                 (word, d["id"])
             ).fetchall()
             for row in rows:
+                entry_reading = row[0] or None
                 if result["reading"] is None:
-                    result["reading"] = row[0]
+                    result["reading"] = entry_reading
                 try:
                     defs = json.loads(row[1])
                     meaningful = [x for x in defs if x.strip()]
+                    entry_pitch = pitch_by_reading.get(
+                        entry_reading, ""
+                    ) if entry_reading else ""
                     for defn in meaningful:
                         result["all_definitions"].append({
                             "text": defn,
                             "dict_name": d["name"],
+                            "reading": entry_reading,
+                            "pitch": entry_pitch,
                         })
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -1930,6 +1944,7 @@ class _SentenceLookupDialog(QDialog):
             dict_combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
+            _row_defs = []  # parallel list of entry dicts for this row
             if all_defs:
                 for d in all_defs:
                     label = d["text"]
@@ -1939,7 +1954,9 @@ class _SentenceLookupDialog(QDialog):
                     if src:
                         label = "[%s] %s" % (src, label)
                     dict_combo.addItem(label, d["text"])
+                    _row_defs.append(d)
             dict_combo.addItem("(none)")
+            _row_defs.append(None)
 
             # Reading / Pitch / Tooltip fields
             reading_edit = QLineEdit(result.get("reading") or "")
@@ -1953,11 +1970,25 @@ class _SentenceLookupDialog(QDialog):
             tooltip_edit = QLineEdit(first_def)
             tooltip_edit.setPlaceholderText("tooltip text")
 
-            # When dictionary selection changes, populate tooltip
-            def _on_dict_change(index, combo=dict_combo, tip=tooltip_edit):
-                data = combo.currentData()
-                if data:  # not the "(none)" entry
-                    tip.setText(data)
+            # When dictionary selection changes, update tooltip,
+            # reading, and pitch
+            def _on_dict_change(
+                index, defs=_row_defs, tip=tooltip_edit,
+                rdg=reading_edit, pit=pitch_edit
+            ):
+                if index < 0 or index >= len(defs):
+                    return
+                entry = defs[index]
+                if entry:
+                    tip.setText(entry["text"])
+                    r = entry.get("reading") or ""
+                    p = entry.get("pitch") or ""
+                    if r:
+                        rdg.setText(r)
+                    if p:
+                        pit.setText(p)
+                else:
+                    tip.clear()
             dict_combo.currentIndexChanged.connect(_on_dict_change)
 
             grid.addWidget(cb, row_num, 0)
@@ -2116,6 +2147,7 @@ class _LookupPreviewDialog(QDialog):
             self.dict_combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
+            self._def_entries = []  # parallel list of entry dicts
             for d in all_defs:
                 label = d["text"]
                 if len(label) > 80:
@@ -2124,15 +2156,26 @@ class _LookupPreviewDialog(QDialog):
                 if src:
                     label = "[%s] %s" % (src, label)
                 self.dict_combo.addItem(label, d["text"])
+                self._def_entries.append(d)
             self.dict_combo.addItem("(none)")
+            self._def_entries.append(None)
             dl.addWidget(self.dict_combo)
             layout.addWidget(dg)
 
-            # When dictionary selection changes, populate the definition field
+            # When dictionary selection changes, update definition,
+            # reading, and pitch fields
             def _on_dict_change(index):
-                data = self.dict_combo.currentData()
-                if data:  # not the "(none)" entry
-                    self.def_edit.setPlainText(data)
+                if index < 0 or index >= len(self._def_entries):
+                    return
+                entry = self._def_entries[index]
+                if entry:
+                    self.def_edit.setPlainText(entry["text"])
+                    rdg = entry.get("reading") or ""
+                    pit = entry.get("pitch") or ""
+                    if rdg:
+                        self.reading_edit.setText(rdg)
+                    if pit:
+                        self.pitch_edit.setText(pit)
                 else:
                     self.def_edit.clear()
             self.dict_combo.currentIndexChanged.connect(_on_dict_change)
