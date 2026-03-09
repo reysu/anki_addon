@@ -1170,6 +1170,124 @@ def _build_annotation(word, result):
 
 
 # ---------------------------------------------------------------------------
+# MeCab tokenizer integration
+# ---------------------------------------------------------------------------
+
+_mecab_tagger = None   # lazy singleton
+_mecab_available = None  # None = not checked, True/False
+
+# Particles and other words to skip during sentence annotation
+_SKIP_POS = {
+    "\u52a9\u8a5e",       # 助詞 — particles
+    "\u52a9\u52d5\u8a5e", # 助動詞 — auxiliary verbs
+    "\u8a18\u53f7",       # 記号 — symbols/punctuation
+    "\u7a7a\u767d",       # 空白 — whitespace
+    "\u88dc\u52a9\u8a18\u53f7",  # 補助記号 — supplementary symbols
+}
+
+
+def _check_mecab():
+    """Check if fugashi + unidic-lite are importable."""
+    global _mecab_available
+    if _mecab_available is not None:
+        return _mecab_available
+    try:
+        from fugashi import Tagger as _T
+        _T()  # will fail if no dictionary
+        _mecab_available = True
+    except Exception:
+        _mecab_available = False
+    return _mecab_available
+
+
+def _get_mecab():
+    """Return a fugashi Tagger singleton."""
+    global _mecab_tagger
+    if _mecab_tagger is None:
+        from fugashi import Tagger
+        _mecab_tagger = Tagger()
+    return _mecab_tagger
+
+
+def _tokenize_sentence(text):
+    """Tokenize a Japanese sentence with MeCab.
+
+    Returns list of dicts:
+        surface  — the word as it appears in text
+        lemma    — dictionary form
+        reading  — kana reading (katakana → hiragana)
+        pos      — top-level part of speech (e.g. 名詞, 動詞)
+        skip     — True if this token should not be annotated
+    """
+    tagger = _get_mecab()
+    tokens = []
+    for word in tagger(text):
+        surface = word.surface
+        feat = word.feature
+        # UniDic feature fields: pos1, pos2, pos3, pos4, ...
+        # word.pos gives "pos1,pos2,..."  e.g. "動詞,一般,*,*"
+        pos1 = feat.pos1 if hasattr(feat, 'pos1') else str(feat[0]) if len(feat) > 0 else ""
+
+        # lemma (dictionary form)
+        lemma = None
+        if hasattr(feat, 'lemma'):
+            lemma = feat.lemma
+        elif hasattr(feat, 'orthBase'):
+            lemma = feat.orthBase
+        if not lemma or lemma == '*':
+            lemma = surface
+
+        # Reading (katakana) → convert to hiragana
+        raw_reading = None
+        if hasattr(feat, 'kana'):
+            raw_reading = feat.kana
+        elif hasattr(feat, 'pron'):
+            raw_reading = feat.pron
+        if not raw_reading or raw_reading == '*':
+            raw_reading = surface
+        reading_hira = _kata_to_hira(raw_reading)
+
+        skip = pos1 in _SKIP_POS or not surface.strip()
+        # Also skip if the surface is only punctuation / ascii
+        if surface.strip() and all(
+            ord(c) < 0x3000 or ord(c) in range(0xFF01, 0xFF5F)
+            for c in surface.strip()
+        ):
+            skip = True
+
+        tokens.append({
+            "surface": surface,
+            "lemma": lemma,
+            "reading": reading_hira,
+            "pos": pos1,
+            "skip": skip,
+        })
+    return tokens
+
+
+def _kata_to_hira(text):
+    """Convert katakana to hiragana."""
+    result = []
+    for ch in text:
+        cp = ord(ch)
+        if 0x30A1 <= cp <= 0x30F6:  # katakana ァ-ヶ
+            result.append(chr(cp - 0x60))
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def _is_sentence(text):
+    """Heuristic: text is a sentence if it has >4 chars and looks Japanese."""
+    # If MeCab is available and text is long enough, treat as sentence
+    jp_chars = sum(
+        1 for c in text
+        if 0x3000 <= ord(c) <= 0x9FFF or 0xF900 <= ord(c) <= 0xFAFF
+    )
+    return jp_chars >= 4
+
+
+# ---------------------------------------------------------------------------
 # Editor integration: toolbar button + lookup
 # ---------------------------------------------------------------------------
 
@@ -1180,17 +1298,13 @@ def _on_editor_did_init(editor):
         cmd="uf_lookup",
         func=lambda ed: _do_lookup(ed),
         tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
-        label="UF辞",
+        label="UF\u8f9e",
         keys="Ctrl+Shift+F",
     )
 
 
 def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
-    # Grab selected text AND the current field index so we can
-    # do the replacement directly on the note field after the
-    # preview dialog closes (the selection is lost once the
-    # dialog takes focus).
     editor.web.evalWithCallback(
         "(() => {"
         "  const s = window.getSelection();"
@@ -1210,21 +1324,56 @@ def _handle_lookup_result(editor, selected_text):
         return
 
     db = _get_dict_db()
+    field_idx = editor.currentField
+
+    # Decide: single-word mode or sentence mode
+    use_sentence_mode = False
+    if _check_mecab() and _is_sentence(selected_text):
+        # Try single-word first; if no result, fall through to sentence
+        single = db.lookup(selected_text)
+        if not single["reading"] and not single["pitch_code"]:
+            use_sentence_mode = True
+        else:
+            # Exact match found — use single-word mode
+            pass
+
+    if use_sentence_mode:
+        _handle_sentence_lookup(editor, selected_text, field_idx)
+        return
+
+    # --- Single-word mode ---
     result = db.lookup(selected_text)
 
     if (not result["reading"] and not result["pitch_code"]
             and not result["definition"]):
-        from aqt.utils import showInfo
-        showInfo(
-            "No results found for: %s\n\n"
-            "Make sure you have dictionaries imported.\n"
-            "(Tools \u2192 Universal Furigana Settings "
-            "\u2192 Dictionary Lookup tab)" % selected_text
-        )
-        return
+        # If MeCab is available, try lemma (dictionary form)
+        if _check_mecab():
+            tokens = _tokenize_sentence(selected_text)
+            # If it tokenized to 1 content token, try its lemma
+            content = [t for t in tokens if not t["skip"]]
+            if len(content) == 1 and content[0]["lemma"] != selected_text:
+                result = db.lookup(content[0]["lemma"])
+                if result["reading"] is None:
+                    result["reading"] = content[0]["reading"]
 
-    # Remember which field is active so we can replace in it
-    field_idx = editor.currentField
+    if (not result["reading"] and not result["pitch_code"]
+            and not result["definition"]):
+        from aqt.utils import showInfo
+        msg = "No results found for: %s" % selected_text
+        if not _check_mecab():
+            msg += (
+                "\n\nFor sentence mode, install MeCab:\n"
+                "  pip install fugashi unidic-lite\n\n"
+                "(Run in the same Python that Anki uses.)"
+            )
+        else:
+            msg += (
+                "\n\nMake sure you have dictionaries imported.\n"
+                "(Tools \u2192 Universal Furigana Settings "
+                "\u2192 Dictionary Lookup tab)"
+            )
+        showInfo(msg)
+        return
 
     dialog = _LookupPreviewDialog(
         editor.parentWindow, selected_text, result
@@ -1232,16 +1381,232 @@ def _handle_lookup_result(editor, selected_text):
     if dialog.exec():
         annotation = dialog.get_annotation()
         if annotation and editor.note is not None and field_idx is not None:
-            # Replace directly in the note field HTML.
-            # This avoids selection-loss issues when the dialog
-            # steals focus from the editor's webview.
             field_html = editor.note.fields[field_idx]
-            # Replace only the first occurrence of the selected
-            # word to avoid unintended replacements elsewhere.
             new_html = field_html.replace(selected_text, annotation, 1)
             if new_html != field_html:
                 editor.note.fields[field_idx] = new_html
                 editor.loadNoteKeepingFocus()
+
+
+# ---------------------------------------------------------------------------
+# Sentence lookup: tokenize → lookup each word → preview all
+# ---------------------------------------------------------------------------
+
+def _handle_sentence_lookup(editor, sentence, field_idx):
+    """Tokenize a sentence and look up each content word."""
+    db = _get_dict_db()
+    tokens = _tokenize_sentence(sentence)
+
+    # Build word list with lookup results
+    word_results = []
+    for tok in tokens:
+        if tok["skip"]:
+            word_results.append({
+                "surface": tok["surface"],
+                "lemma": tok["lemma"],
+                "skip": True,
+                "result": None,
+                "enabled": False,
+            })
+            continue
+
+        # Try surface form first, then lemma
+        result = db.lookup(tok["surface"])
+        if not result["reading"] and not result["pitch_code"]:
+            result = db.lookup(tok["lemma"])
+
+        # If still no reading from DB, use MeCab's reading
+        if not result["reading"] and tok["reading"]:
+            result["reading"] = tok["reading"]
+
+        has_data = bool(
+            result["reading"] or result["pitch_code"]
+            or result["definition"]
+        )
+
+        word_results.append({
+            "surface": tok["surface"],
+            "lemma": tok["lemma"],
+            "skip": False,
+            "result": result,
+            "enabled": has_data,
+        })
+
+    # Check if we found anything at all
+    any_found = any(w["enabled"] for w in word_results)
+    if not any_found:
+        from aqt.utils import showInfo
+        showInfo(
+            "No dictionary results found for any word "
+            "in the selected text.\n\n"
+            "Make sure you have dictionaries imported.\n"
+            "(Tools \u2192 Universal Furigana Settings "
+            "\u2192 Dictionary Lookup tab)"
+        )
+        return
+
+    dialog = _SentenceLookupDialog(
+        editor.parentWindow, sentence, word_results
+    )
+    if dialog.exec():
+        annotated = dialog.get_annotated_sentence()
+        if annotated and editor.note is not None and field_idx is not None:
+            field_html = editor.note.fields[field_idx]
+            new_html = field_html.replace(sentence, annotated, 1)
+            if new_html != field_html:
+                editor.note.fields[field_idx] = new_html
+                editor.loadNoteKeepingFocus()
+
+
+class _SentenceLookupDialog(QDialog):
+    """Preview dialog for sentence-mode lookup.
+
+    Shows each tokenized word with reading / pitch / definition.
+    User can enable/disable and edit each word before inserting.
+    """
+
+    def __init__(self, parent, sentence, word_results):
+        super().__init__(parent)
+        self.setWindowTitle("Sentence Lookup")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+        self.sentence = sentence
+        self.word_results = word_results
+        self._rows = []  # list of row widget dicts
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "<b>Sentence mode:</b> check the words you want to "
+            "annotate, edit as needed, then click Insert."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(info)
+
+        # Scrollable word list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        grid = QGridLayout(scroll_widget)
+        grid.setContentsMargins(4, 4, 4, 4)
+
+        # Headers
+        for col, hdr in enumerate(
+            ["\u2713", "Word", "Reading", "Pitch", "Definition"]
+        ):
+            lbl = QLabel("<b>%s</b>" % hdr)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            grid.addWidget(lbl, 0, col)
+
+        row_num = 1
+        for w in self.word_results:
+            if w["skip"]:
+                continue
+
+            cb = QCheckBox()
+            cb.setChecked(w["enabled"])
+
+            surface_lbl = QLabel(w["surface"])
+            surface_lbl.setToolTip(
+                "Dictionary form: %s" % w["lemma"]
+            )
+
+            result = w["result"] or {}
+            reading_edit = QLineEdit(result.get("reading") or "")
+            reading_edit.setPlaceholderText("reading")
+            reading_edit.setMaximumWidth(120)
+
+            pitch_edit = QLineEdit(result.get("pitch_code") or "")
+            pitch_edit.setPlaceholderText("h/a/o/nX")
+            pitch_edit.setMaximumWidth(60)
+
+            def_edit = QLineEdit(result.get("definition") or "")
+            def_edit.setPlaceholderText("definition")
+
+            grid.addWidget(cb, row_num, 0)
+            grid.addWidget(surface_lbl, row_num, 1)
+            grid.addWidget(reading_edit, row_num, 2)
+            grid.addWidget(pitch_edit, row_num, 3)
+            grid.addWidget(def_edit, row_num, 4)
+
+            self._rows.append({
+                "surface": w["surface"],
+                "cb": cb,
+                "reading": reading_edit,
+                "pitch": pitch_edit,
+                "definition": def_edit,
+            })
+            row_num += 1
+
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # Preview
+        self.preview_label = QLabel()
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.preview_label)
+
+        # Connect signals for live preview
+        for r in self._rows:
+            r["cb"].stateChanged.connect(self._update_preview)
+            r["reading"].textChanged.connect(self._update_preview)
+            r["pitch"].textChanged.connect(self._update_preview)
+            r["definition"].textChanged.connect(self._update_preview)
+        self._update_preview()
+
+        # Buttons
+        bl = QHBoxLayout()
+        bl.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        insert_btn = QPushButton("Insert")
+        insert_btn.clicked.connect(self.accept)
+        insert_btn.setDefault(True)
+        bl.addWidget(cancel_btn)
+        bl.addWidget(insert_btn)
+        layout.addLayout(bl)
+
+    def _update_preview(self):
+        annotated = self.get_annotated_sentence()
+        if annotated:
+            safe = annotated.replace("<", "&lt;").replace(">", "&gt;")
+            self.preview_label.setText(
+                "<b>Preview:</b> <code>%s</code>" % safe
+            )
+
+    def get_annotated_sentence(self):
+        """Build the annotated sentence by replacing each enabled word."""
+        # Build a map: surface → annotation (for enabled words)
+        replacements = {}  # surface → annotation string
+        for r in self._rows:
+            if not r["cb"].isChecked():
+                continue
+            reading = r["reading"].text().strip()
+            pitch = r["pitch"].text().strip()
+            definition = r["definition"].text().strip()
+            result = {
+                "reading": reading or None,
+                "pitch_code": pitch or None,
+                "definition": definition or None,
+            }
+            ann = _build_annotation(r["surface"], result)
+            if ann:
+                replacements[r["surface"]] = ann
+
+        if not replacements:
+            return self.sentence
+
+        # Walk through the sentence and replace each occurrence
+        # We process left-to-right, replacing longer matches first
+        result_text = self.sentence
+        for surface, ann in replacements.items():
+            result_text = result_text.replace(surface, ann, 1)
+
+        return result_text
 
 
 class _LookupPreviewDialog(QDialog):
@@ -1695,7 +2060,8 @@ class SettingsDialog(QDialog):
         dict_info = QLabel(
             "<b>Dictionary Lookup</b><br>"
             "Import Yomitan / Yomichan dictionary .zip files below. "
-            "Then in the card editor, highlight a word and press "
+            "Then in the card editor, highlight a word (or a whole "
+            "sentence) and press "
             "<b>Ctrl+Shift+F</b> (or click the <b>UF\u8f9e</b> button) "
             "to auto-fill reading, pitch accent, and definition."
         )
@@ -1705,6 +2071,54 @@ class SettingsDialog(QDialog):
 
         self._dict_manager = _DictManagerWidget()
         dict_layout.addWidget(self._dict_manager)
+
+        # -- MeCab sentence mode --
+        mecab_group = QGroupBox(
+            "Sentence Mode (MeCab \u2014 Japanese Tokenizer)"
+        )
+        mecab_layout = QVBoxLayout(mecab_group)
+
+        mecab_status = (
+            "\u2705 MeCab is installed and working."
+            if _check_mecab()
+            else "\u274C MeCab is <b>not installed</b>. "
+                 "Sentence mode requires <code>fugashi</code> "
+                 "+ <code>unidic-lite</code>."
+        )
+        mecab_label = QLabel(mecab_status)
+        mecab_label.setTextFormat(Qt.TextFormat.RichText)
+        mecab_label.setWordWrap(True)
+        mecab_layout.addWidget(mecab_label)
+
+        if not _check_mecab():
+            install_info = QLabel(
+                "To enable sentence mode, run this command "
+                "in a terminal (use the same Python that Anki uses):"
+                "<br><br>"
+                "<code>pip install fugashi unidic-lite</code>"
+                "<br><br>"
+                "Then restart Anki. Once installed, you can "
+                "highlight an entire sentence and the add-on "
+                "will tokenize it, look up each word, skip "
+                "particles, and handle conjugated forms."
+            )
+            install_info.setTextFormat(Qt.TextFormat.RichText)
+            install_info.setWordWrap(True)
+            mecab_layout.addWidget(install_info)
+        else:
+            mecab_desc = QLabel(
+                "Highlight a sentence in the card editor and "
+                "press <b>Ctrl+Shift+F</b>. The add-on will "
+                "tokenize the sentence with MeCab, look up each "
+                "content word (skipping particles), handle "
+                "conjugated forms, and show a preview where you "
+                "can check/uncheck which words to annotate."
+            )
+            mecab_desc.setTextFormat(Qt.TextFormat.RichText)
+            mecab_desc.setWordWrap(True)
+            mecab_layout.addWidget(mecab_desc)
+
+        dict_layout.addWidget(mecab_group)
         dict_layout.addStretch()
 
         tabs.addTab(dict_tab, "Dictionary Lookup")
