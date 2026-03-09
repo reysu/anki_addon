@@ -1656,44 +1656,16 @@ def _on_editor_did_init_buttons(buttons, editor):
 
 def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
-    # Get selected text AND which occurrence it is within the field,
-    # so that we replace the correct instance when duplicates exist.
     editor.web.evalWithCallback(
         "(() => {"
         "  var s = window.getSelection();"
-        "  if (!s || !s.rangeCount) return JSON.stringify({text:'',occ:0});"
-        "  var text = s.toString().trim();"
-        "  if (!text) return JSON.stringify({text:'',occ:0});"
-        "  var range = s.getRangeAt(0);"
-        "  var root = range.startContainer;"
-        "  while (root && !(root.classList && root.classList.contains('field')))"
-        "    root = root.parentNode;"
-        "  if (!root) root = range.startContainer;"
-        "  var beforeRange = document.createRange();"
-        "  beforeRange.setStart(root, 0);"
-        "  beforeRange.setEnd(range.startContainer, range.startOffset);"
-        "  var before = beforeRange.toString();"
-        "  var occ = 0;"
-        "  var pos = -1;"
-        "  while ((pos = before.indexOf(text, pos + 1)) !== -1) occ++;"
-        "  return JSON.stringify({text: text, occ: occ});"
+        "  return s ? s.toString().trim() : '';"
         "})()",
-        lambda result: _handle_lookup_json(editor, result)
+        lambda text: _handle_lookup_result(editor, text)
     )
 
 
-def _handle_lookup_json(editor, result_json):
-    """Parse the JSON from _do_lookup and dispatch."""
-    try:
-        data = json.loads(result_json) if result_json else {}
-    except (json.JSONDecodeError, TypeError):
-        data = {}
-    text = data.get("text", "").strip()
-    occ = data.get("occ", 0)
-    _handle_lookup_result(editor, text, occ)
-
-
-def _handle_lookup_result(editor, selected_text, occurrence=0):
+def _handle_lookup_result(editor, selected_text):
     """Handle the lookup after getting selected text."""
     if not selected_text:
         from aqt.utils import showInfo
@@ -1717,7 +1689,7 @@ def _handle_lookup_result(editor, selected_text, occurrence=0):
             pass
 
     if use_sentence_mode:
-        _handle_sentence_lookup(editor, selected_text, field_idx, occurrence)
+        _handle_sentence_lookup(editor, selected_text, field_idx)
         return
 
     # --- Single-word mode ---
@@ -1763,25 +1735,37 @@ def _handle_lookup_result(editor, selected_text, occurrence=0):
         if annotation and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
             spaced = _insert_with_spaces(
-                field_html, selected_text, annotation, occurrence
+                field_html, selected_text, annotation
             )
             if spaced != field_html:
                 editor.note.fields[field_idx] = spaced
                 editor.loadNoteKeepingFocus()
 
 
-def _insert_with_spaces(html, old, new, occurrence=0):
-    """Replace the *occurrence*-th instance of *old* with *new* in *html*,
-    adding a space before/after the annotation when the neighboring
-    character is not already a space, newline, or tag boundary.
-    *occurrence* is 0-based: 0 = first, 1 = second, etc."""
-    idx = -1
-    search_start = 0
-    for _ in range(occurrence + 1):
-        idx = html.find(old, search_start)
+def _insert_with_spaces(html, old, new):
+    """Replace *old* with *new* in *html*, adding a space before/after
+    the annotation when the neighboring character is not already a space,
+    newline, or tag boundary.  When *old* appears more than once, prefer
+    the first occurrence that is NOT already annotated (i.e. not
+    immediately followed by '{')."""
+    # Collect all occurrence positions
+    positions = []
+    start = 0
+    while True:
+        idx = html.find(old, start)
         if idx == -1:
-            return html
-        search_start = idx + 1
+            break
+        positions.append(idx)
+        start = idx + 1
+    if not positions:
+        return html
+    # Prefer the first occurrence not already inside an annotation
+    idx = positions[0]  # default: first
+    for pos in positions:
+        after_pos = pos + len(old)
+        if after_pos >= len(html) or html[after_pos] != '{':
+            idx = pos
+            break
     before = html[:idx]
     after = html[idx + len(old):]
     # Add space before if needed
@@ -1797,7 +1781,7 @@ def _insert_with_spaces(html, old, new, occurrence=0):
 # Sentence lookup: tokenize → lookup each word → preview all
 # ---------------------------------------------------------------------------
 
-def _handle_sentence_lookup(editor, sentence, field_idx, occurrence=0):
+def _handle_sentence_lookup(editor, sentence, field_idx):
     """Tokenize a sentence and look up each content word."""
     db = _get_dict_db()
     tokens = _tokenize_sentence(sentence)
@@ -1868,22 +1852,7 @@ def _handle_sentence_lookup(editor, sentence, field_idx, occurrence=0):
         annotated = dialog.get_annotated_sentence()
         if annotated and editor.note is not None and field_idx is not None:
             field_html = editor.note.fields[field_idx]
-            # Find the correct occurrence of the sentence
-            idx = -1
-            search_start = 0
-            for _ in range(occurrence + 1):
-                idx = field_html.find(sentence, search_start)
-                if idx == -1:
-                    break
-                search_start = idx + 1
-            if idx != -1:
-                new_html = (
-                    field_html[:idx]
-                    + annotated
-                    + field_html[idx + len(sentence):]
-                )
-            else:
-                new_html = field_html.replace(sentence, annotated, 1)
+            new_html = field_html.replace(sentence, annotated, 1)
             if new_html != field_html:
                 editor.note.fields[field_idx] = new_html
                 editor.loadNoteKeepingFocus()
