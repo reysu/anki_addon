@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v7)
+Universal Furigana Add-on for Anki (v8)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -40,7 +40,7 @@ from aqt.qt import (
     QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox,
     QDoubleSpinBox, QFileDialog, QListWidget, QListWidgetItem,
     QProgressDialog, QApplication, QLineEdit, QTextEdit,
-    QTabWidget
+    QTabWidget, QComboBox
 )
 
 
@@ -1129,6 +1129,63 @@ class _DictDB:
 
         return result
 
+    def lookup_all(self, word):
+        """Look up a word and return ALL definitions from all dicts.
+
+        Returns dict with same shape as lookup(), plus:
+            all_definitions — list of {"text": ..., "dict_name": ...}
+        """
+        c = self.conn()
+        result = {"reading": None, "pitch_code": None, "definition": None,
+                  "all_definitions": []}
+        dicts = self.get_dictionaries()
+
+        # Pitch (first match wins)
+        for d in dicts:
+            if d["type"] not in ("pitch", "both"):
+                continue
+            row = c.execute(
+                "SELECT reading, position FROM pitch_accents "
+                "WHERE expression=? AND dict_id=? LIMIT 1",
+                (word, d["id"])
+            ).fetchone()
+            if row:
+                result["pitch_code"] = _position_to_uf_code(row[1], row[0])
+                if result["reading"] is None:
+                    result["reading"] = row[0]
+                break
+
+        # Definitions — collect ALL across all term dicts
+        all_defs = []
+        for d in dicts:
+            if d["type"] not in ("term", "both"):
+                continue
+            rows = c.execute(
+                "SELECT reading, definitions FROM terms "
+                "WHERE expression=? AND dict_id=? "
+                "ORDER BY score DESC",
+                (word, d["id"])
+            ).fetchall()
+            for row in rows:
+                if result["reading"] is None:
+                    result["reading"] = row[0]
+                try:
+                    defs = json.loads(row[1])
+                    meaningful = [x for x in defs if x.strip()]
+                    for defn in meaningful:
+                        all_defs.append({
+                            "text": defn,
+                            "dict_name": d["name"],
+                        })
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        result["all_definitions"] = all_defs
+        if all_defs:
+            result["definition"] = all_defs[0]["text"]
+
+        return result
+
 
 _dict_db = None
 
@@ -1281,6 +1338,109 @@ def _get_mecab():
     return _mecab_process
 
 
+def _tokenize_sentence_raw(text):
+    """Get raw tokens from MeCab (before merging)."""
+    mecab = _get_mecab()
+    mecab.stdin.write(text.strip().encode("utf-8", "ignore") + b"\n")
+    mecab.stdin.flush()
+
+    tokens = []
+    while True:
+        line = mecab.stdout.readline().rstrip(b"\r\n").decode("utf-8", "replace")
+        if not line or line == "EOS":
+            break
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        surface, pos1, lemma, reading_kata = parts[0], parts[1], parts[2], parts[3]
+        if not lemma or lemma == '*':
+            lemma = surface
+        reading_hira = _kata_to_hira(reading_kata) if reading_kata else surface
+        tokens.append({
+            "surface": surface,
+            "lemma": lemma,
+            "reading": reading_hira,
+            "pos": pos1,
+        })
+    return tokens
+
+
+# POS tags that should be merged onto the preceding verb/adjective
+_MERGE_POS = {
+    "\u52a9\u52d5\u8a5e",  # 助動詞 — auxiliary verbs (e.g. ている, た, ない)
+}
+# POS tags that form compound verbs when sandwiched (e.g. て in 知っている)
+_TE_PARTICLES = {"\u3066", "\u3067", "\u3061\u3083"}  # て, で, ちゃ
+
+
+def _merge_tokens(tokens):
+    """Merge conjugation fragments into whole words.
+
+    E.g. 知っ(V) + て(助詞) + いる(V) → 知っている  (looked up as 知る)
+         食べ(V) + た(助動詞)       → 食べた      (looked up as 食べる)
+         走っ(V) + て(助詞) + いる(V) → 走っている  (looked up as 走る)
+    """
+    if not tokens:
+        return tokens
+
+    merged = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        # If this is a verb/adj, try to absorb following aux tokens
+        if tok["pos"] in ("\u52d5\u8a5e", "\u5f62\u5bb9\u8a5e",
+                          "\u5f62\u72b6\u8a5e"):  # 動詞, 形容詞, 形状詞
+            combined_surface = tok["surface"]
+            combined_reading = tok["reading"]
+            base_lemma = tok["lemma"]
+            j = i + 1
+            while j < len(tokens):
+                next_tok = tokens[j]
+                # Merge auxiliary verbs (助動詞): た, ない, れる, etc.
+                if next_tok["pos"] in _MERGE_POS:
+                    combined_surface += next_tok["surface"]
+                    combined_reading += next_tok["reading"]
+                    j += 1
+                # Merge て/で particle + following verb (ている, てくれる, etc.)
+                elif (next_tok["pos"] == "\u52a9\u8a5e"  # 助詞
+                      and next_tok["surface"] in _TE_PARTICLES
+                      and j + 1 < len(tokens)
+                      and tokens[j + 1]["pos"] in
+                      ("\u52d5\u8a5e",  # 動詞
+                       "\u52a9\u52d5\u8a5e")):  # 助動詞
+                    combined_surface += next_tok["surface"]
+                    combined_reading += next_tok["reading"]
+                    combined_surface += tokens[j + 1]["surface"]
+                    combined_reading += tokens[j + 1]["reading"]
+                    j += 2
+                else:
+                    break
+            merged.append({
+                "surface": combined_surface,
+                "lemma": base_lemma,
+                "reading": combined_reading,
+                "pos": tok["pos"],
+                "skip": False,
+            })
+            i = j
+        else:
+            skip = tok["pos"] in _SKIP_POS or not tok["surface"].strip()
+            if tok["surface"].strip() and all(
+                ord(c) < 0x3000 or ord(c) in range(0xFF01, 0xFF5F)
+                for c in tok["surface"].strip()
+            ):
+                skip = True
+            merged.append({
+                "surface": tok["surface"],
+                "lemma": tok["lemma"],
+                "reading": tok["reading"],
+                "pos": tok["pos"],
+                "skip": skip,
+            })
+            i += 1
+    return merged
+
+
 def _tokenize_sentence(text):
     """Tokenize a Japanese sentence with the bundled MeCab binary.
 
@@ -1291,43 +1451,8 @@ def _tokenize_sentence(text):
         pos      — top-level part of speech (e.g. 名詞, 動詞)
         skip     — True if this token should not be annotated
     """
-    mecab = _get_mecab()
-    # Send text to MeCab
-    mecab.stdin.write(text.strip().encode("utf-8", "ignore") + b"\n")
-    mecab.stdin.flush()
-
-    tokens = []
-    while True:
-        line = mecab.stdout.readline().rstrip(b"\r\n").decode("utf-8", "replace")
-        if not line or line == "EOS":
-            break
-        # Format: surface\tPOS\tlemma\treading
-        parts = line.split("\t")
-        if len(parts) < 4:
-            continue
-        surface, pos1, lemma, reading_kata = parts[0], parts[1], parts[2], parts[3]
-
-        if not lemma or lemma == '*':
-            lemma = surface
-        # Convert katakana reading to hiragana
-        reading_hira = _kata_to_hira(reading_kata) if reading_kata else surface
-
-        skip = pos1 in _SKIP_POS or not surface.strip()
-        # Also skip if the surface is only punctuation / ascii
-        if surface.strip() and all(
-            ord(c) < 0x3000 or ord(c) in range(0xFF01, 0xFF5F)
-            for c in surface.strip()
-        ):
-            skip = True
-
-        tokens.append({
-            "surface": surface,
-            "lemma": lemma,
-            "reading": reading_hira,
-            "pos": pos1,
-            "skip": skip,
-        })
-    return tokens
+    raw = _tokenize_sentence_raw(text)
+    return _merge_tokens(raw)
 
 
 def _kata_to_hira(text):
@@ -1474,10 +1599,10 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
             })
             continue
 
-        # Try surface form first, then lemma
-        result = db.lookup(tok["surface"])
+        # Try surface form first, then lemma (use lookup_all for defs)
+        result = db.lookup_all(tok["surface"])
         if not result["reading"] and not result["pitch_code"]:
-            result = db.lookup(tok["lemma"])
+            result = db.lookup_all(tok["lemma"])
 
         # If still no reading from DB, use MeCab's reading
         if not result["reading"] and tok["reading"]:
@@ -1525,14 +1650,14 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
 class _SentenceLookupDialog(QDialog):
     """Preview dialog for sentence-mode lookup.
 
-    Shows each tokenized word with reading / pitch / definition.
+    Shows each tokenized word with reading / pitch / definition selector.
     User can enable/disable and edit each word before inserting.
     """
 
     def __init__(self, parent, sentence, word_results):
         super().__init__(parent)
         self.setWindowTitle("Sentence Lookup")
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(700)
         self.setMinimumHeight(400)
         self.sentence = sentence
         self.word_results = word_results
@@ -1587,21 +1712,67 @@ class _SentenceLookupDialog(QDialog):
             pitch_edit.setPlaceholderText("h/a/o/nX")
             pitch_edit.setMaximumWidth(60)
 
-            def_edit = QLineEdit(result.get("definition") or "")
-            def_edit.setPlaceholderText("definition")
+            # Definition: use a combo box if multiple definitions exist,
+            # otherwise fall back to a plain QLineEdit.
+            all_defs = result.get("all_definitions") or []
+            first_def = result.get("definition") or ""
+            def_combo = None
+            def_edit = None
+
+            if len(all_defs) > 1:
+                # Combo box with all defs, plus "(Custom)" option
+                def_combo = QComboBox()
+                def_combo.setMinimumWidth(200)
+                def_combo.setSizeAdjustPolicy(
+                    QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+                )
+                for idx, d in enumerate(all_defs):
+                    label = d["text"]
+                    if len(label) > 80:
+                        label = label[:77] + "..."
+                    src = d.get("dict_name", "")
+                    if src:
+                        label = "[%s] %s" % (src, label)
+                    def_combo.addItem(label, d["text"])
+                def_combo.addItem("(Custom...)")
+                # Also add a hidden line edit for custom input
+                def_edit = QLineEdit(first_def)
+                def_edit.setPlaceholderText("custom definition")
+                def_edit.setVisible(False)
+                # When user picks "(Custom...)", show the line edit
+                def _on_combo_change(index, combo=def_combo, edit=def_edit):
+                    if index == combo.count() - 1:  # last item = Custom
+                        edit.setVisible(True)
+                        edit.setFocus()
+                    else:
+                        edit.setVisible(False)
+                def_combo.currentIndexChanged.connect(_on_combo_change)
+
+                # Wrap combo + edit in a layout
+                def_widget = QWidget()
+                def_layout = QVBoxLayout(def_widget)
+                def_layout.setContentsMargins(0, 0, 0, 0)
+                def_layout.setSpacing(2)
+                def_layout.addWidget(def_combo)
+                def_layout.addWidget(def_edit)
+                grid.addWidget(def_widget, row_num, 4)
+            else:
+                def_edit = QLineEdit(first_def)
+                def_edit.setPlaceholderText("definition")
+                grid.addWidget(def_edit, row_num, 4)
 
             grid.addWidget(cb, row_num, 0)
             grid.addWidget(surface_lbl, row_num, 1)
             grid.addWidget(reading_edit, row_num, 2)
             grid.addWidget(pitch_edit, row_num, 3)
-            grid.addWidget(def_edit, row_num, 4)
 
             self._rows.append({
                 "surface": w["surface"],
                 "cb": cb,
                 "reading": reading_edit,
                 "pitch": pitch_edit,
-                "definition": def_edit,
+                "def_combo": def_combo,
+                "def_edit": def_edit,
             })
             row_num += 1
 
@@ -1619,7 +1790,12 @@ class _SentenceLookupDialog(QDialog):
             r["cb"].stateChanged.connect(self._update_preview)
             r["reading"].textChanged.connect(self._update_preview)
             r["pitch"].textChanged.connect(self._update_preview)
-            r["definition"].textChanged.connect(self._update_preview)
+            if r["def_combo"]:
+                r["def_combo"].currentIndexChanged.connect(
+                    self._update_preview
+                )
+            if r["def_edit"]:
+                r["def_edit"].textChanged.connect(self._update_preview)
         self._update_preview()
 
         # Buttons
@@ -1634,7 +1810,22 @@ class _SentenceLookupDialog(QDialog):
         bl.addWidget(insert_btn)
         layout.addLayout(bl)
 
-    def _update_preview(self):
+    @staticmethod
+    def _get_def_text(row):
+        """Get the active definition text from a row."""
+        combo = row.get("def_combo")
+        edit = row.get("def_edit")
+        if combo is not None:
+            # If user picked "(Custom...)" (last item), use line edit
+            if combo.currentIndex() == combo.count() - 1:
+                return edit.text().strip() if edit else ""
+            data = combo.currentData()
+            return data.strip() if data else ""
+        if edit is not None:
+            return edit.text().strip()
+        return ""
+
+    def _update_preview(self, *_args):
         annotated = self.get_annotated_sentence()
         if annotated:
             safe = annotated.replace("<", "&lt;").replace(">", "&gt;")
@@ -1643,15 +1834,19 @@ class _SentenceLookupDialog(QDialog):
             )
 
     def get_annotated_sentence(self):
-        """Build the annotated sentence by replacing each enabled word."""
-        # Build a map: surface → annotation (for enabled words)
+        """Build annotated sentence, walking token-by-token.
+
+        Adds a space before each annotated word so annotations don't
+        merge into surrounding text in the output.
+        """
+        # Build surface → annotation map for checked rows
         replacements = {}  # surface → annotation string
         for r in self._rows:
             if not r["cb"].isChecked():
                 continue
             reading = r["reading"].text().strip()
             pitch = r["pitch"].text().strip()
-            definition = r["definition"].text().strip()
+            definition = self._get_def_text(r)
             result = {
                 "reading": reading or None,
                 "pitch_code": pitch or None,
@@ -1664,13 +1859,37 @@ class _SentenceLookupDialog(QDialog):
         if not replacements:
             return self.sentence
 
-        # Walk through the sentence and replace each occurrence
-        # We process left-to-right, replacing longer matches first
-        result_text = self.sentence
-        for surface, ann in replacements.items():
-            result_text = result_text.replace(surface, ann, 1)
+        # Walk through the sentence left-to-right, matching surfaces.
+        # Insert a space before annotated words so they don't glue.
+        text = self.sentence
+        out_parts = []
+        pos = 0
+        # Sort surfaces longest-first for greedy matching
+        surfaces = sorted(replacements.keys(), key=len, reverse=True)
+        used = set()  # track which surfaces have been replaced (once each)
+        while pos < len(text):
+            matched = False
+            for surf in surfaces:
+                if surf in used:
+                    continue
+                if text[pos:pos + len(surf)] == surf:
+                    # Add space separator if there's preceding content
+                    # (but not if previous char is already a space)
+                    if out_parts and not out_parts[-1].endswith(" "):
+                        out_parts.append(" ")
+                    out_parts.append(replacements[surf])
+                    # Also add a trailing space so the next char
+                    # doesn't glue to the annotation's closing }
+                    out_parts.append(" ")
+                    pos += len(surf)
+                    used.add(surf)
+                    matched = True
+                    break
+            if not matched:
+                out_parts.append(text[pos])
+                pos += 1
 
-        return result_text
+        return "".join(out_parts).strip()
 
 
 class _LookupPreviewDialog(QDialog):
