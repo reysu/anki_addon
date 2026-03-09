@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10f)
+Universal Furigana Add-on for Anki (v10g)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -43,7 +43,8 @@ from aqt.qt import (
     QTabWidget, QComboBox
 )
 
-sys.stderr.write("[Universal Furigana] Add-on loaded successfully\n")
+# Debug marker (stdout, not stderr — stderr triggers Anki error dialogs)
+sys.stdout.write("[Universal Furigana] Add-on loaded successfully\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1230,7 +1231,7 @@ class _DictDB:
                     break
 
         # Definitions — collect ALL across all term dicts
-        # Also store per-entry reading + pitch for dict-switch UI
+        # Store per-entry reading + pitch so dict-switch UI can update
         for d in dicts:
             if d["type"] not in ("term", "both"):
                 continue
@@ -1244,7 +1245,7 @@ class _DictDB:
                 entry_reading = row[0] or None
                 if result["reading"] is None:
                     result["reading"] = entry_reading
-                # Look up pitch for this specific reading
+                # Look up pitch for this entry's reading
                 entry_pitch = ""
                 if entry_reading:
                     pr = c.execute(
@@ -1662,12 +1663,12 @@ def _on_editor_did_init_buttons(buttons, editor):
             cmd="uf_lookup",
             func=lambda ed: _do_lookup(ed),
             tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
-            label="\U0001F4D6",
+            label="UF\u8f9e",
             keys="Ctrl+Shift+F",
         )
         buttons.append(btn)
     except Exception as exc:
-        sys.stderr.write("[UF] editor button error: %s\n" % exc)
+        sys.stdout.write("[UF] editor button error: %s\n" % exc)
 
 
 def _do_lookup(editor):
@@ -1951,8 +1952,7 @@ class _SentenceLookupDialog(QDialog):
             tooltip_edit = QLineEdit(first_def)
             tooltip_edit.setPlaceholderText("tooltip text")
 
-            # When dictionary selection changes, update tooltip,
-            # reading, and pitch
+            # When dictionary selection changes, update all fields
             def _on_dict_change(
                 index, defs=all_defs, tip=tooltip_edit,
                 rdg=reading_edit, pit=pitch_edit
@@ -2139,11 +2139,9 @@ class _LookupPreviewDialog(QDialog):
             dl.addWidget(self.dict_combo)
             layout.addWidget(dg)
 
-            # When dictionary selection changes, update definition,
-            # reading, and pitch fields
+            # When dictionary selection changes, update all fields
             def _on_dict_change(index):
                 if index < 0 or index >= len(self._all_defs):
-                    # "(none)" selected or out of range
                     self.def_edit.clear()
                     return
                 entry = self._all_defs[index]
