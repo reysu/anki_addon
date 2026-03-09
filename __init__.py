@@ -498,16 +498,40 @@ _SCRIPT_TEMPLATE = r"""
         }
     }
 
-    var _pinned = null; // currently pinned .uf-has-info element
+    var _pinned = null;  // currently pinned .uf-has-info element
+    var _hoverEl = null;  // element whose tooltip is shown via hover
+    var _hoverHideTimer = null;  // delay before hiding hover tooltip
 
     // Desktop: hover to preview (only when nothing is pinned)
     document.body.addEventListener('mouseenter', function(e) {
+        if (_pinned) return;
         var el = e.target.closest('.uf-has-info');
-        if (el && !_pinned) showPopup(el);
+        // Also keep tooltip open when mouse enters the popup itself
+        var inPopup = e.target.closest('.uf-tooltip');
+        if (el) {
+            if (_hoverHideTimer) { clearTimeout(_hoverHideTimer); _hoverHideTimer = null; }
+            if (_hoverEl && _hoverEl !== el) hidePopup(_hoverEl);
+            _hoverEl = el;
+            showPopup(el);
+        } else if (inPopup) {
+            // Mouse moved into the tooltip popup — cancel any pending hide
+            if (_hoverHideTimer) { clearTimeout(_hoverHideTimer); _hoverHideTimer = null; }
+        }
     }, true);
     document.body.addEventListener('mouseleave', function(e) {
+        if (_pinned) return;
         var el = e.target.closest('.uf-has-info');
-        if (el && !_pinned) hidePopup(el);
+        var inPopup = e.target.closest('.uf-tooltip');
+        if (el || inPopup) {
+            // Small delay so mouse can travel from word to tooltip without flicker
+            if (_hoverHideTimer) clearTimeout(_hoverHideTimer);
+            _hoverHideTimer = setTimeout(function() {
+                if (_hoverEl && !_pinned) {
+                    hidePopup(_hoverEl);
+                    _hoverEl = null;
+                }
+            }, 120);
+        }
     }, true);
 
     // Click to pin/unpin (desktop + mobile fallback)
@@ -519,18 +543,17 @@ _SCRIPT_TEMPLATE = r"""
         var el = e.target.closest('.uf-has-info');
         if (el) {
             if (_pinned === el) {
-                // Clicking the same word: unpin and hide
                 _pinned = null;
                 hidePopup(el);
             } else {
-                // Pin this word open
                 if (_pinned) hidePopup(_pinned);
                 _pinned = el;
+                _hoverEl = null;
+                if (_hoverHideTimer) { clearTimeout(_hoverHideTimer); _hoverHideTimer = null; }
                 hideAllPopups();
                 showPopup(el);
             }
         } else {
-            // Clicked outside: unpin and hide all
             _pinned = null;
             hideAllPopups();
         }
@@ -1623,7 +1646,7 @@ def _on_editor_did_init_buttons(buttons, editor):
             cmd="uf_lookup",
             func=lambda ed: _do_lookup(ed),
             tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
-            label="UF\u8f9e",
+            label="\U0001F4D6",
             keys="Ctrl+Shift+F",
         )
         buttons.append(btn)
