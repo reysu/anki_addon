@@ -30,6 +30,8 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 from aqt import mw, gui_hooks
 from aqt.editor import Editor
 from aqt.qt import (
@@ -1170,11 +1172,18 @@ def _build_annotation(word, result):
 
 
 # ---------------------------------------------------------------------------
-# MeCab tokenizer integration
+# MeCab tokenizer integration (bundled binary — no pip install needed)
 # ---------------------------------------------------------------------------
 
-_mecab_tagger = None   # lazy singleton
+_mecab_process = None   # lazy subprocess.Popen singleton
 _mecab_available = None  # None = not checked, True/False
+
+_SUPPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "support")
+
+# ipadic node format: surface\tPOS\tlemma\treading  (tab-separated)
+_MECAB_NODE_FMT = r"%m\t%f[0]\t%f[6]\t%f[7]\n"
+_MECAB_EOS_FMT = r"EOS\n"
+_MECAB_UNK_FMT = r"%m\t%m\t%m\t\n"
 
 # Particles and other words to skip during sentence annotation
 _SKIP_POS = {
@@ -1186,32 +1195,94 @@ _SKIP_POS = {
 }
 
 
+def _mecab_cmd():
+    """Build the MeCab command for the current platform."""
+    from anki.utils import is_win, is_mac
+    exe = os.path.join(_SUPPORT_DIR, "mecab")
+    if is_win:
+        exe = os.path.normpath(exe) + ".exe"
+    elif not is_mac:
+        exe += ".lin"
+    return [
+        exe,
+        "--node-format=" + _MECAB_NODE_FMT,
+        "--eos-format=" + _MECAB_EOS_FMT,
+        "--unk-format=" + _MECAB_UNK_FMT,
+        "-d", _SUPPORT_DIR,
+        "-r", os.path.join(_SUPPORT_DIR, "mecabrc"),
+    ]
+
+
 def _check_mecab():
-    """Check if fugashi + unidic-lite are importable."""
+    """Check if the bundled MeCab binary is usable."""
     global _mecab_available
     if _mecab_available is not None:
         return _mecab_available
     try:
-        from fugashi import Tagger as _T
-        _T()  # will fail if no dictionary
-        _mecab_available = True
+        cmd = _mecab_cmd()
+        # Set library paths so the binary can find libmecab
+        env = os.environ.copy()
+        env["DYLD_LIBRARY_PATH"] = _SUPPORT_DIR
+        env["LD_LIBRARY_PATH"] = _SUPPORT_DIR
+        # Make sure the binary is executable (macOS/Linux)
+        from anki.utils import is_win
+        if not is_win:
+            os.chmod(cmd[0], 0o755)
+        p = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            startupinfo=_si(),
+        )
+        p.stdin.write("\u30c6\u30b9\u30c8\n".encode("utf-8"))  # テスト
+        p.stdin.flush()
+        line = p.stdout.readline()
+        p.terminate()
+        _mecab_available = len(line) > 0
     except Exception:
         _mecab_available = False
     return _mecab_available
 
 
-def _get_mecab():
-    """Return a fugashi Tagger singleton."""
-    global _mecab_tagger
-    if _mecab_tagger is None:
-        from fugashi import Tagger
-        _mecab_tagger = Tagger()
-    return _mecab_tagger
+def _si():
+    """Return STARTUPINFO on Windows to hide console window."""
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        try:
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        except AttributeError:
+            pass
+        return si
+    return None
 
+
+def _get_mecab():
+    """Return a running MeCab subprocess (lazy singleton)."""
+    global _mecab_process
+    if _mecab_process is None or _mecab_process.poll() is not None:
+        cmd = _mecab_cmd()
+        env = os.environ.copy()
+        env["DYLD_LIBRARY_PATH"] = _SUPPORT_DIR
+        env["LD_LIBRARY_PATH"] = _SUPPORT_DIR
+        from anki.utils import is_win
+        if not is_win:
+            os.chmod(cmd[0], 0o755)
+        _mecab_process = subprocess.Popen(
+            cmd,
+            bufsize=-1,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            startupinfo=_si(),
+        )
+    return _mecab_process
 
 
 def _tokenize_sentence(text):
-    """Tokenize a Japanese sentence with MeCab.
+    """Tokenize a Japanese sentence with the bundled MeCab binary.
 
     Returns list of dicts:
         surface  — the word as it appears in text
@@ -1220,33 +1291,26 @@ def _tokenize_sentence(text):
         pos      — top-level part of speech (e.g. 名詞, 動詞)
         skip     — True if this token should not be annotated
     """
-    tagger = _get_mecab()
-    tokens = []
-    for word in tagger(text):
-        surface = word.surface
-        feat = word.feature
-        # UniDic feature fields: pos1, pos2, pos3, pos4, ...
-        # word.pos gives "pos1,pos2,..."  e.g. "動詞,一般,*,*"
-        pos1 = feat.pos1 if hasattr(feat, 'pos1') else str(feat[0]) if len(feat) > 0 else ""
+    mecab = _get_mecab()
+    # Send text to MeCab
+    mecab.stdin.write(text.strip().encode("utf-8", "ignore") + b"\n")
+    mecab.stdin.flush()
 
-        # lemma (dictionary form)
-        lemma = None
-        if hasattr(feat, 'lemma'):
-            lemma = feat.lemma
-        elif hasattr(feat, 'orthBase'):
-            lemma = feat.orthBase
+    tokens = []
+    while True:
+        line = mecab.stdout.readline().rstrip(b"\r\n").decode("utf-8", "replace")
+        if not line or line == "EOS":
+            break
+        # Format: surface\tPOS\tlemma\treading
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        surface, pos1, lemma, reading_kata = parts[0], parts[1], parts[2], parts[3]
+
         if not lemma or lemma == '*':
             lemma = surface
-
-        # Reading (katakana) → convert to hiragana
-        raw_reading = None
-        if hasattr(feat, 'kana'):
-            raw_reading = feat.kana
-        elif hasattr(feat, 'pron'):
-            raw_reading = feat.pron
-        if not raw_reading or raw_reading == '*':
-            raw_reading = surface
-        reading_hira = _kata_to_hira(raw_reading)
+        # Convert katakana reading to hiragana
+        reading_hira = _kata_to_hira(reading_kata) if reading_kata else surface
 
         skip = pos1 in _SKIP_POS or not surface.strip()
         # Also skip if the surface is only punctuation / ascii
@@ -1363,12 +1427,8 @@ def _handle_lookup_result(editor, selected_text):
         msg = "No results found for: %s" % selected_text
         if not _check_mecab():
             msg += (
-                "\n\nFor sentence mode, install MeCab via:\n"
-                "  Help \u2192 Debug Console, then paste:\n"
-                "  import subprocess, sys; subprocess.check_call("
-                "[sys.executable, '-m', 'pip', 'install', "
-                "'fugashi', 'unidic-lite'])\n\n"
-                "Then restart Anki."
+                "\n\nMeCab could not be loaded on this system.\n"
+                "Sentence mode may not be available."
             )
         else:
             msg += (
@@ -2083,48 +2143,27 @@ class SettingsDialog(QDialog):
         mecab_layout = QVBoxLayout(mecab_group)
 
         mecab_status = (
-            "\u2705 MeCab is installed and working."
+            "\u2705 MeCab is bundled and working."
             if _check_mecab()
-            else "\u274C MeCab is <b>not installed</b>. "
-                 "Sentence mode requires <code>fugashi</code> "
-                 "+ <code>unidic-lite</code>."
+            else "\u274C MeCab binary could not be loaded. "
+                 "Sentence mode may not work on this platform."
         )
         mecab_label = QLabel(mecab_status)
         mecab_label.setTextFormat(Qt.TextFormat.RichText)
         mecab_label.setWordWrap(True)
         mecab_layout.addWidget(mecab_label)
 
-        if not _check_mecab():
-            install_info = QLabel(
-                "Sentence mode is optional. To enable it, "
-                "open Anki\u2019s debug console "
-                "(<b>Help \u2192 Debug Console</b>) and paste:"
-                "<br><br>"
-                "<code>import subprocess, sys; "
-                "subprocess.check_call([sys.executable, "
-                "'-m', 'pip', 'install', "
-                "'fugashi', 'unidic-lite'])</code>"
-                "<br><br>"
-                "Then restart Anki."
-            )
-            install_info.setTextFormat(Qt.TextFormat.RichText)
-            install_info.setWordWrap(True)
-            install_info.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            mecab_layout.addWidget(install_info)
-        else:
-            mecab_desc = QLabel(
-                "Highlight a sentence in the card editor and "
-                "press <b>Ctrl+Shift+F</b>. The add-on will "
-                "tokenize the sentence with MeCab, look up each "
-                "content word (skipping particles), handle "
-                "conjugated forms, and show a preview where you "
-                "can check/uncheck which words to annotate."
-            )
-            mecab_desc.setTextFormat(Qt.TextFormat.RichText)
-            mecab_desc.setWordWrap(True)
-            mecab_layout.addWidget(mecab_desc)
+        mecab_desc = QLabel(
+            "Highlight a sentence in the card editor and "
+            "press <b>Ctrl+Shift+F</b>. The add-on will "
+            "tokenize the sentence with MeCab, look up each "
+            "content word (skipping particles), handle "
+            "conjugated forms, and show a preview where you "
+            "can check/uncheck which words to annotate."
+        )
+        mecab_desc.setTextFormat(Qt.TextFormat.RichText)
+        mecab_desc.setWordWrap(True)
+        mecab_layout.addWidget(mecab_desc)
 
         dict_layout.addWidget(mecab_group)
         dict_layout.addStretch()
