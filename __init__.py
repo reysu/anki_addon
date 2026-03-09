@@ -1,9 +1,10 @@
 """
-Universal Furigana Add-on for Anki (v5)
+Universal Furigana Add-on for Anki (v6)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
 Info tooltips via hover (desktop) or tap (mobile).
+Dictionary lookup: import Yomitan/Yomichan dictionaries for auto-fill.
 
 Works on desktop (Anki 2.1.x) via card_will_show hook.
 Works on mobile (AnkiDroid / AnkiMobile) via template injection.
@@ -28,12 +29,16 @@ Author: Eric Su (reysu)
 import json
 import os
 import re
+import sqlite3
 from aqt import mw, gui_hooks
+from aqt.editor import Editor
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QPushButton, QColorDialog, QGroupBox, QGridLayout,
     QFrame, Qt, QFont, QWidget, QScrollArea, QMessageBox,
-    QDoubleSpinBox
+    QDoubleSpinBox, QFileDialog, QListWidget, QListWidgetItem,
+    QProgressDialog, QApplication, QLineEdit, QTextEdit,
+    QTabWidget
 )
 
 
@@ -757,6 +762,727 @@ gui_hooks.card_will_show.append(on_card_will_show)
 
 
 # ---------------------------------------------------------------------------
+# Dictionary lookup: mora counter, pitch code converter
+# ---------------------------------------------------------------------------
+
+_SMALL_KANA = set('ゃゅょャュョァィゥェォ')
+
+
+def _count_mora(kana):
+    """Count mora in a kana string, combining digraphs."""
+    count = 0
+    i = 0
+    while i < len(kana):
+        count += 1
+        if i + 1 < len(kana) and kana[i + 1] in _SMALL_KANA:
+            i += 2
+        else:
+            i += 1
+    return count
+
+
+def _position_to_uf_code(position, reading):
+    """Convert Yomitan pitch position number to UF pitch code."""
+    if position == 0:
+        return "h"
+    elif position == 1:
+        return "a"
+    else:
+        mora_count = _count_mora(reading)
+        if position == mora_count:
+            return "o"
+        else:
+            return "n%d" % position
+
+
+def _extract_text_from_content(content, parts):
+    """Recursively extract text from Yomitan structured-content."""
+    if isinstance(content, str):
+        parts.append(content)
+    elif isinstance(content, list):
+        for item in content:
+            _extract_text_from_content(item, parts)
+    elif isinstance(content, dict):
+        if "content" in content:
+            _extract_text_from_content(content["content"], parts)
+        elif "text" in content:
+            parts.append(content["text"])
+
+
+# ---------------------------------------------------------------------------
+# Dictionary database manager
+# ---------------------------------------------------------------------------
+
+class _DictDB:
+    """Manages the SQLite dictionary database."""
+
+    def __init__(self):
+        self._conn = None
+        self._db_path = None
+
+    def _get_db_path(self):
+        if self._db_path is None:
+            addon_dir = os.path.dirname(os.path.abspath(__file__))
+            self._db_path = os.path.join(
+                addon_dir, "user_files", "dictionaries.db"
+            )
+            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+        return self._db_path
+
+    def conn(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._get_db_path())
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._ensure_tables()
+        return self._conn
+
+    def _ensure_tables(self):
+        c = self.conn()
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS dictionaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                revision TEXT,
+                entry_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dict_id INTEGER NOT NULL,
+                expression TEXT NOT NULL,
+                reading TEXT NOT NULL,
+                score INTEGER DEFAULT 0,
+                definitions TEXT NOT NULL,
+                FOREIGN KEY (dict_id) REFERENCES dictionaries(id)
+            );
+            CREATE TABLE IF NOT EXISTS pitch_accents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dict_id INTEGER NOT NULL,
+                expression TEXT NOT NULL,
+                reading TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                FOREIGN KEY (dict_id) REFERENCES dictionaries(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_terms_expr
+                ON terms(expression);
+            CREATE INDEX IF NOT EXISTS idx_terms_expr_read
+                ON terms(expression, reading);
+            CREATE INDEX IF NOT EXISTS idx_pitch_expr
+                ON pitch_accents(expression);
+            CREATE INDEX IF NOT EXISTS idx_pitch_expr_read
+                ON pitch_accents(expression, reading);
+        """)
+        c.commit()
+
+    def close(self):
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
+    def get_dictionaries(self):
+        """Return list of dicts ordered by priority."""
+        rows = self.conn().execute(
+            "SELECT id, name, type, priority, revision, entry_count "
+            "FROM dictionaries ORDER BY priority ASC, id ASC"
+        ).fetchall()
+        return [
+            {"id": r[0], "name": r[1], "type": r[2], "priority": r[3],
+             "revision": r[4], "entry_count": r[5]}
+            for r in rows
+        ]
+
+    def delete_dictionary(self, dict_id):
+        c = self.conn()
+        c.execute("DELETE FROM terms WHERE dict_id=?", (dict_id,))
+        c.execute("DELETE FROM pitch_accents WHERE dict_id=?", (dict_id,))
+        c.execute("DELETE FROM dictionaries WHERE id=?", (dict_id,))
+        c.commit()
+
+    def set_priority(self, dict_id, priority):
+        c = self.conn()
+        c.execute(
+            "UPDATE dictionaries SET priority=? WHERE id=?",
+            (priority, dict_id)
+        )
+        c.commit()
+
+    def import_dictionary(self, zip_path, progress_cb=None):
+        """Import a Yomitan .zip dictionary. Returns dict name."""
+        import zipfile as zf
+
+        with zf.ZipFile(zip_path, 'r') as z:
+            try:
+                index_data = json.loads(z.read("index.json"))
+            except (KeyError, json.JSONDecodeError):
+                raise ValueError(
+                    "Invalid dictionary: missing or bad index.json"
+                )
+
+            dict_name = index_data.get("title", "Unknown Dictionary")
+            revision = str(index_data.get("revision", ""))
+
+            names = z.namelist()
+            term_banks = sorted(
+                [n for n in names
+                 if n.startswith("term_bank_") and n.endswith(".json")]
+            )
+            meta_banks = sorted(
+                [n for n in names
+                 if n.startswith("term_meta_bank_") and n.endswith(".json")]
+            )
+
+            has_terms = len(term_banks) > 0
+            has_pitch = False
+
+            if has_terms and meta_banks:
+                dict_type = "both"
+            elif has_terms:
+                dict_type = "term"
+            elif meta_banks:
+                dict_type = "pitch"
+            else:
+                raise ValueError(
+                    "Dictionary contains no term or pitch data"
+                )
+
+            c = self.conn()
+            max_pri = c.execute(
+                "SELECT COALESCE(MAX(priority), -1) FROM dictionaries"
+            ).fetchone()[0]
+
+            cur = c.execute(
+                "INSERT INTO dictionaries "
+                "(name, type, priority, revision) VALUES (?, ?, ?, ?)",
+                (dict_name, dict_type, max_pri + 1, revision)
+            )
+            dict_id = cur.lastrowid
+            entry_count = 0
+            total_files = len(term_banks) + len(meta_banks)
+            processed = 0
+
+            # --- term banks ---
+            for bank_name in term_banks:
+                try:
+                    entries = json.loads(z.read(bank_name))
+                except json.JSONDecodeError:
+                    continue
+
+                batch = []
+                for entry in entries:
+                    if not isinstance(entry, list) or len(entry) < 6:
+                        continue
+                    expression = str(entry[0])
+                    reading = str(entry[1]) if entry[1] else expression
+                    score = (
+                        int(entry[4])
+                        if isinstance(entry[4], (int, float)) else 0
+                    )
+                    raw_defs = entry[5]
+                    defs = []
+                    if isinstance(raw_defs, str):
+                        defs = [raw_defs]
+                    elif isinstance(raw_defs, list):
+                        for d in raw_defs:
+                            if isinstance(d, str):
+                                defs.append(d)
+                            elif isinstance(d, dict):
+                                dt = d.get("type", "")
+                                if dt == "text":
+                                    defs.append(d.get("text", ""))
+                                elif dt == "structured-content":
+                                    parts = []
+                                    _extract_text_from_content(
+                                        d.get("content", ""), parts
+                                    )
+                                    if parts:
+                                        defs.append(" ".join(parts))
+                                elif dt != "image":
+                                    txt = d.get(
+                                        "text", d.get("content", "")
+                                    )
+                                    if isinstance(txt, str) and txt:
+                                        defs.append(txt)
+                    if not defs:
+                        defs = [""]
+                    batch.append((
+                        dict_id, expression, reading, score,
+                        json.dumps(defs, ensure_ascii=False)
+                    ))
+                    entry_count += 1
+
+                if batch:
+                    c.executemany(
+                        "INSERT INTO terms "
+                        "(dict_id, expression, reading, score, definitions) "
+                        "VALUES (?,?,?,?,?)",
+                        batch
+                    )
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total_files)
+
+            # --- meta banks (pitch) ---
+            for bank_name in meta_banks:
+                try:
+                    entries = json.loads(z.read(bank_name))
+                except json.JSONDecodeError:
+                    continue
+
+                pitch_batch = []
+                for entry in entries:
+                    if not isinstance(entry, list) or len(entry) < 3:
+                        continue
+                    if entry[1] != "pitch":
+                        continue
+                    has_pitch = True
+                    data = entry[2]
+                    if not isinstance(data, dict):
+                        continue
+                    rd = data.get("reading", str(entry[0]))
+                    for p in data.get("pitches", []):
+                        if isinstance(p, dict) and isinstance(
+                            p.get("position"), int
+                        ):
+                            pitch_batch.append((
+                                dict_id, str(entry[0]), rd, p["position"]
+                            ))
+                            entry_count += 1
+
+                if pitch_batch:
+                    c.executemany(
+                        "INSERT INTO pitch_accents "
+                        "(dict_id, expression, reading, position) "
+                        "VALUES (?,?,?,?)",
+                        pitch_batch
+                    )
+                processed += 1
+                if progress_cb:
+                    progress_cb(processed, total_files)
+
+            # Finalize type
+            if has_pitch and not has_terms:
+                c.execute(
+                    "UPDATE dictionaries SET type='pitch' WHERE id=?",
+                    (dict_id,)
+                )
+            elif has_pitch and has_terms:
+                c.execute(
+                    "UPDATE dictionaries SET type='both' WHERE id=?",
+                    (dict_id,)
+                )
+
+            c.execute(
+                "UPDATE dictionaries SET entry_count=? WHERE id=?",
+                (entry_count, dict_id)
+            )
+            c.commit()
+            return dict_name
+
+    # ---- Lookup methods ----
+
+    def lookup(self, word):
+        """Look up a word. First-match-wins across dicts by priority."""
+        c = self.conn()
+        result = {"reading": None, "pitch_code": None, "definition": None}
+        dicts = self.get_dictionaries()
+
+        # Pitch
+        for d in dicts:
+            if d["type"] not in ("pitch", "both"):
+                continue
+            row = c.execute(
+                "SELECT reading, position FROM pitch_accents "
+                "WHERE expression=? AND dict_id=? LIMIT 1",
+                (word, d["id"])
+            ).fetchone()
+            if row:
+                result["pitch_code"] = _position_to_uf_code(row[1], row[0])
+                if result["reading"] is None:
+                    result["reading"] = row[0]
+                break
+
+        # Definition
+        for d in dicts:
+            if d["type"] not in ("term", "both"):
+                continue
+            row = c.execute(
+                "SELECT reading, definitions FROM terms "
+                "WHERE expression=? AND dict_id=? "
+                "ORDER BY score DESC LIMIT 1",
+                (word, d["id"])
+            ).fetchone()
+            if row:
+                if result["reading"] is None:
+                    result["reading"] = row[0]
+                try:
+                    defs = json.loads(row[1])
+                    meaningful = [x for x in defs if x.strip()]
+                    if meaningful:
+                        result["definition"] = meaningful[0]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                break
+
+        return result
+
+
+_dict_db = None
+
+
+def _get_dict_db():
+    global _dict_db
+    if _dict_db is None:
+        _dict_db = _DictDB()
+    return _dict_db
+
+
+# ---------------------------------------------------------------------------
+# Dictionary lookup: annotation builder
+# ---------------------------------------------------------------------------
+
+def _build_annotation(word, result):
+    """Build the UF annotation string from lookup result."""
+    reading = result.get("reading")
+    pitch = result.get("pitch_code")
+    definition = result.get("definition")
+
+    if not reading and not pitch and not definition:
+        return None
+
+    parts = []
+    if reading:
+        parts.append(reading)
+    if pitch:
+        parts.append(pitch)
+    elif definition and reading:
+        parts.append("?")
+    if definition:
+        clean_def = definition.replace(";", ",")
+        if len(clean_def) > 200:
+            clean_def = clean_def[:197] + "..."
+        parts.append(clean_def)
+
+    if not parts:
+        return None
+    return "%s{%s}" % (word, ";".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Editor integration: toolbar button + lookup
+# ---------------------------------------------------------------------------
+
+def _on_editor_did_init(editor):
+    """Add lookup button to editor toolbar."""
+    editor.addButton(
+        icon=None,
+        cmd="uf_lookup",
+        func=lambda ed: _do_lookup(ed),
+        tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
+        label="UF辞",
+        keys="Ctrl+Shift+F",
+    )
+
+
+def _do_lookup(editor):
+    """Perform dictionary lookup on selected text in editor."""
+    editor.web.evalWithCallback(
+        "(() => {"
+        "  const s = window.getSelection();"
+        "  return s ? s.toString().trim() : '';"
+        "})()",
+        lambda text: _handle_lookup_result(editor, text)
+    )
+
+
+def _handle_lookup_result(editor, selected_text):
+    """Handle the lookup after getting selected text."""
+    if not selected_text:
+        from aqt.utils import showInfo
+        showInfo(
+            "Select some text first, then click the lookup button."
+        )
+        return
+
+    db = _get_dict_db()
+    result = db.lookup(selected_text)
+
+    if (not result["reading"] and not result["pitch_code"]
+            and not result["definition"]):
+        from aqt.utils import showInfo
+        showInfo(
+            "No results found for: %s\n\n"
+            "Make sure you have dictionaries imported.\n"
+            "(Tools \u2192 Universal Furigana Settings "
+            "\u2192 Dictionary Lookup tab)" % selected_text
+        )
+        return
+
+    dialog = _LookupPreviewDialog(
+        editor.parentWindow, selected_text, result
+    )
+    if dialog.exec():
+        annotation = dialog.get_annotation()
+        if annotation:
+            js_ann = json.dumps(annotation)
+            editor.web.eval(
+                "(() => {"
+                "  const s = window.getSelection();"
+                "  if (s && s.rangeCount > 0) {"
+                "    const r = s.getRangeAt(0);"
+                "    r.deleteContents();"
+                "    r.insertNode(document.createTextNode(%s));"
+                "    s.collapseToEnd();"
+                "  }"
+                "})()" % js_ann
+            )
+            if editor.currentField is not None:
+                editor.loadNoteKeepingFocus()
+
+
+class _LookupPreviewDialog(QDialog):
+    """Preview dialog showing lookup results before inserting."""
+
+    def __init__(self, parent, word, result):
+        super().__init__(parent)
+        self.setWindowTitle("Dictionary Lookup \u2014 %s" % word)
+        self.setMinimumWidth(420)
+        self.word = word
+        self.result = result
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        word_label = QLabel("<h2>%s</h2>" % self.word)
+        word_label.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(word_label)
+
+        # Reading
+        rg = QGroupBox("Reading")
+        rl = QHBoxLayout(rg)
+        self.reading_edit = QLineEdit()
+        self.reading_edit.setText(self.result.get("reading") or "")
+        self.reading_edit.setPlaceholderText("e.g. \u305f\u3079\u308b")
+        rl.addWidget(self.reading_edit)
+        layout.addWidget(rg)
+
+        # Pitch
+        pg = QGroupBox("Pitch Accent")
+        pl = QHBoxLayout(pg)
+        self.pitch_edit = QLineEdit()
+        self.pitch_edit.setText(self.result.get("pitch_code") or "")
+        self.pitch_edit.setPlaceholderText("h / a / o / nX")
+        pl.addWidget(self.pitch_edit)
+        pl.addWidget(QLabel(
+            "<small>h=heiban, a=atamadaka, o=odaka, nX=nakadaka</small>"
+        ))
+        layout.addWidget(pg)
+
+        # Definition
+        dg = QGroupBox("Definition / Tooltip")
+        dl = QVBoxLayout(dg)
+        self.def_edit = QTextEdit()
+        self.def_edit.setPlainText(self.result.get("definition") or "")
+        self.def_edit.setPlaceholderText("English definition or notes...")
+        self.def_edit.setMaximumHeight(100)
+        dl.addWidget(self.def_edit)
+        layout.addWidget(dg)
+
+        # Preview
+        self.preview_label = QLabel()
+        self.preview_label.setTextFormat(Qt.TextFormat.RichText)
+        self._update_preview()
+        layout.addWidget(self.preview_label)
+
+        self.reading_edit.textChanged.connect(self._update_preview)
+        self.pitch_edit.textChanged.connect(self._update_preview)
+        self.def_edit.textChanged.connect(self._update_preview)
+
+        # Buttons
+        bl = QHBoxLayout()
+        bl.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        insert_btn = QPushButton("Insert")
+        insert_btn.clicked.connect(self.accept)
+        insert_btn.setDefault(True)
+        bl.addWidget(cancel_btn)
+        bl.addWidget(insert_btn)
+        layout.addLayout(bl)
+
+    def _update_preview(self):
+        ann = self.get_annotation()
+        if ann:
+            self.preview_label.setText(
+                "<b>Preview:</b> <code>%s</code>"
+                % ann.replace("<", "&lt;")
+            )
+        else:
+            self.preview_label.setText(
+                "<b>Preview:</b> <i>(no annotation)</i>"
+            )
+
+    def get_annotation(self):
+        reading = self.reading_edit.text().strip()
+        pitch = self.pitch_edit.text().strip()
+        definition = self.def_edit.toPlainText().strip()
+        r = {
+            "reading": reading or None,
+            "pitch_code": pitch or None,
+            "definition": definition or None,
+        }
+        return _build_annotation(self.word, r)
+
+
+# Register editor hook
+gui_hooks.editor_did_init.append(_on_editor_did_init)
+
+
+# ---------------------------------------------------------------------------
+# Dictionary manager widget (for settings dialog)
+# ---------------------------------------------------------------------------
+
+class _DictManagerWidget(QWidget):
+    """Widget for managing imported dictionaries."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+        self._refresh_list()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        info = QLabel(
+            "Import Yomitan / Yomichan dictionary .zip files to enable "
+            "automatic lookup of readings, pitch accent, and definitions.\n"
+            "Dictionaries are searched in priority order "
+            "(top = highest priority, first match wins)."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.dict_list = QListWidget()
+        self.dict_list.setMinimumHeight(140)
+        layout.addWidget(self.dict_list)
+
+        bl = QHBoxLayout()
+        import_btn = QPushButton("Import .zip\u2026")
+        import_btn.clicked.connect(self._on_import)
+        bl.addWidget(import_btn)
+
+        up_btn = QPushButton("\u25B2 Up")
+        up_btn.clicked.connect(self._on_move_up)
+        bl.addWidget(up_btn)
+
+        down_btn = QPushButton("\u25BC Down")
+        down_btn.clicked.connect(self._on_move_down)
+        bl.addWidget(down_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._on_remove)
+        bl.addWidget(remove_btn)
+
+        bl.addStretch()
+        layout.addLayout(bl)
+
+    def _refresh_list(self):
+        self.dict_list.clear()
+        db = _get_dict_db()
+        for d in db.get_dictionaries():
+            type_label = {
+                "term": "\U0001F4D6 Definitions",
+                "pitch": "\U0001F3B5 Pitch",
+                "both": "\U0001F4D6+\U0001F3B5 Both",
+            }
+            label = "%s  \u2014  %s  (%d entries)" % (
+                d["name"],
+                type_label.get(d["type"], d["type"]),
+                d["entry_count"],
+            )
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, d["id"])
+            self.dict_list.addItem(item)
+
+    def _on_import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Yomitan Dictionary", "",
+            "Yomitan Dictionary (*.zip);;All Files (*)"
+        )
+        if not path:
+            return
+
+        progress = QProgressDialog(
+            "Importing dictionary...", "Cancel", 0, 100, self
+        )
+        progress.setWindowTitle("Importing")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        def progress_cb(done, total):
+            if total > 0:
+                progress.setValue(int(done / total * 100))
+            QApplication.processEvents()
+
+        try:
+            db = _get_dict_db()
+            name = db.import_dictionary(path, progress_cb)
+            progress.close()
+            QMessageBox.information(
+                self, "Import Complete",
+                "Successfully imported: %s" % name
+            )
+            self._refresh_list()
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "Import Failed", str(e))
+
+    def _get_selected_id(self):
+        item = self.dict_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _on_remove(self):
+        dict_id = self._get_selected_id()
+        if dict_id is None:
+            return
+        reply = QMessageBox.question(
+            self, "Remove Dictionary",
+            "Are you sure you want to remove this dictionary?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            _get_dict_db().delete_dictionary(dict_id)
+            self._refresh_list()
+
+    def _on_move_up(self):
+        self._swap_priority(-1)
+
+    def _on_move_down(self):
+        self._swap_priority(1)
+
+    def _swap_priority(self, direction):
+        row = self.dict_list.currentRow()
+        if row < 0:
+            return
+        new_row = row + direction
+        if new_row < 0 or new_row >= self.dict_list.count():
+            return
+        db = _get_dict_db()
+        dicts = db.get_dictionaries()
+        if row >= len(dicts) or new_row >= len(dicts):
+            return
+        id_a, pri_a = dicts[row]["id"], dicts[row]["priority"]
+        id_b, pri_b = dicts[new_row]["id"], dicts[new_row]["priority"]
+        db.set_priority(id_a, pri_b)
+        db.set_priority(id_b, pri_a)
+        self._refresh_list()
+        self.dict_list.setCurrentRow(new_row)
+
+
+# ---------------------------------------------------------------------------
 # Settings dialog
 # ---------------------------------------------------------------------------
 
@@ -793,12 +1519,20 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Universal Furigana \u2014 Settings")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(580)
         self.cfg = _get_config()
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+
+        # Tab widget
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+
+        # ---- Tab 1: General Settings ----
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
 
         # -- How it works --
         info_group = QGroupBox("How It Works")
@@ -840,16 +1574,16 @@ class SettingsDialog(QDialog):
         info_text.setWordWrap(True)
         info_text.setTextFormat(Qt.TextFormat.RichText)
         info_layout.addWidget(info_text)
-        layout.addWidget(info_group)
+        general_layout.addWidget(info_group)
 
         # -- Enable / Disable --
         self.enabled_cb = QCheckBox("Enable furigana conversion")
         self.enabled_cb.setChecked(self.cfg.get("enabled", True))
-        layout.addWidget(self.enabled_cb)
+        general_layout.addWidget(self.enabled_cb)
 
         self.pitch_cb = QCheckBox("Enable pitch accent visualization")
         self.pitch_cb.setChecked(self.cfg.get("pitch_accent_enabled", True))
-        layout.addWidget(self.pitch_cb)
+        general_layout.addWidget(self.pitch_cb)
 
         # -- Color settings --
         color_group = QGroupBox("Pitch Accent Colors")
@@ -870,7 +1604,7 @@ class SettingsDialog(QDialog):
             color_grid.addWidget(lbl, row, 0)
             color_grid.addWidget(btn, row, 1)
 
-        layout.addWidget(color_group)
+        general_layout.addWidget(color_group)
 
         # -- Furigana font size --
         font_group = QGroupBox("Furigana Font Size")
@@ -887,7 +1621,7 @@ class SettingsDialog(QDialog):
         )
         font_layout.addWidget(self.font_spin)
         font_layout.addStretch()
-        layout.addWidget(font_group)
+        general_layout.addWidget(font_group)
 
         # -- Mobile compatibility: template injection --
         mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
@@ -946,9 +1680,33 @@ class SettingsDialog(QDialog):
         sel_layout.addStretch()
         mobile_layout.addLayout(sel_layout)
 
-        layout.addWidget(mobile_group)
+        general_layout.addWidget(mobile_group)
+        general_layout.addStretch()
 
-        # -- Buttons --
+        tabs.addTab(general_tab, "General")
+
+        # ---- Tab 2: Dictionary Lookup ----
+        dict_tab = QWidget()
+        dict_layout = QVBoxLayout(dict_tab)
+
+        dict_info = QLabel(
+            "<b>Dictionary Lookup</b><br>"
+            "Import Yomitan / Yomichan dictionary .zip files below. "
+            "Then in the card editor, highlight a word and press "
+            "<b>Ctrl+Shift+F</b> (or click the <b>UF\u8f9e</b> button) "
+            "to auto-fill reading, pitch accent, and definition."
+        )
+        dict_info.setWordWrap(True)
+        dict_info.setTextFormat(Qt.TextFormat.RichText)
+        dict_layout.addWidget(dict_info)
+
+        self._dict_manager = _DictManagerWidget()
+        dict_layout.addWidget(self._dict_manager)
+        dict_layout.addStretch()
+
+        tabs.addTab(dict_tab, "Dictionary Lookup")
+
+        # -- Buttons (below tabs) --
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
