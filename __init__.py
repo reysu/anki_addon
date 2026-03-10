@@ -391,7 +391,7 @@ _SCRIPT_TEMPLATE = r"""
             var tid = this.getAttribute('data-uf-tt');
             var p = document.getElementById(tid);
             if (!p) return;
-            if (p.style.display === 'block') {
+            if (p.classList.contains('uf-tt-show')) {
                 hidePopup(this);
             } else {
                 hideAllPopups();
@@ -455,47 +455,38 @@ _SCRIPT_TEMPLATE = r"""
         if (!popup) return;
         popup.setAttribute('data-page', '0');
         renderPage(popup);
-        // Use fixed positioning relative to viewport — no layout impact
-        popup.style.display = 'block';
-        popup.style.position = 'fixed';
+        // Position and clamp BEFORE making visible (visibility:hidden
+        // still allows getBoundingClientRect to measure correctly)
         var elRect = el.getBoundingClientRect();
-        var left = elRect.left;
-        var top = elRect.bottom + 2;
-        popup.style.left = left + 'px';
-        popup.style.top = top + 'px';
-        // Measure and clamp to viewport
+        popup.style.left = elRect.left + 'px';
+        popup.style.top = (elRect.bottom + 2) + 'px';
         var pRect = popup.getBoundingClientRect();
-        // Clamp right edge
         if (pRect.right > window.innerWidth - 4) {
             popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
         }
-        // Clamp left edge
         pRect = popup.getBoundingClientRect();
         if (pRect.left < 4) {
             popup.style.left = '4px';
         }
-        // If overflows bottom, show above the word instead
         pRect = popup.getBoundingClientRect();
         if (pRect.bottom > window.innerHeight) {
             popup.style.top = (elRect.top - pRect.height - 2) + 'px';
         }
+        // Now make visible — position is already final
+        popup.classList.add('uf-tt-show');
     }
 
     function hidePopup(el) {
         var popup = getPopupForEl(el);
         if (popup) {
-            popup.style.display = 'none';
-            popup.style.left = '';
-            popup.style.top = '';
+            popup.classList.remove('uf-tt-show');
         }
     }
 
     function hideAllPopups() {
         var popups = document.getElementsByClassName('uf-tooltip');
         for (var i = 0; i < popups.length; i++) {
-            popups[i].style.display = 'none';
-            popups[i].style.left = '';
-            popups[i].style.top = '';
+            popups[i].classList.remove('uf-tt-show');
         }
     }
 
@@ -625,7 +616,7 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
 .uf-has-info { cursor: help; }
-#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; }
+#uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; overflow: visible; }
 .uf-info-dot {
     font-size: 0.55em;
     opacity: 0.35;
@@ -642,7 +633,8 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     font-size: 0.7em;
 }
 .uf-tooltip {
-    display: none;
+    visibility: hidden;
+    pointer-events: none;
     position: fixed;
     z-index: 99999;
     background: #2a2a3e;
@@ -657,9 +649,12 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     max-height: 30vh;
     overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    pointer-events: auto;
     white-space: normal;
     word-wrap: break-word;
+}
+.uf-tooltip.uf-tt-show {
+    visibility: visible;
+    pointer-events: auto;
 }
 .uf-tt-nav {
     display: flex;
