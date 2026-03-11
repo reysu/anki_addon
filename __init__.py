@@ -144,7 +144,7 @@ _SCRIPT_TEMPLATE = r"""
             var isHigh = pattern[i] === 1;
             var nextLow = (i + 1 < mora.length) ? pattern[i + 1] === 0 : false;
 
-            var bTop = isHigh ? (LINE_PX + 'px solid ' + color) : 'none';
+            var bTop = isHigh ? (LINE_PX + 'px solid ' + color) : (LINE_PX + 'px solid transparent');
 
             var hasDrop = false;
             if (type === 'a' && i === 0) hasDrop = true;
@@ -455,25 +455,26 @@ _SCRIPT_TEMPLATE = r"""
         if (!popup) return;
         popup.setAttribute('data-page', '0');
         renderPage(popup);
-        // Position and clamp BEFORE making visible (visibility:hidden
-        // still allows getBoundingClientRect to measure correctly)
-        var elRect = el.getBoundingClientRect();
-        popup.style.left = elRect.left + 'px';
-        popup.style.top = (elRect.bottom + 2) + 'px';
-        var pRect = popup.getBoundingClientRect();
-        if (pRect.right > window.innerWidth - 4) {
-            popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
-        }
-        pRect = popup.getBoundingClientRect();
-        if (pRect.left < 4) {
-            popup.style.left = '4px';
-        }
-        pRect = popup.getBoundingClientRect();
-        if (pRect.bottom > window.innerHeight) {
-            popup.style.top = (elRect.top - pRect.height - 2) + 'px';
-        }
-        // Now make visible — position is already final
-        popup.classList.add('uf-tt-show');
+        // Defer layout reads to next frame so the mouseenter handler
+        // doesn't force a synchronous reflow (which causes 1px jitter).
+        requestAnimationFrame(function() {
+            var elRect = el.getBoundingClientRect();
+            popup.style.left = elRect.left + 'px';
+            popup.style.top = (elRect.bottom + 2) + 'px';
+            var pRect = popup.getBoundingClientRect();
+            if (pRect.right > window.innerWidth - 4) {
+                popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
+            }
+            pRect = popup.getBoundingClientRect();
+            if (pRect.left < 4) {
+                popup.style.left = '4px';
+            }
+            pRect = popup.getBoundingClientRect();
+            if (pRect.bottom > window.innerHeight) {
+                popup.style.top = (elRect.top - pRect.height - 2) + 'px';
+            }
+            popup.classList.add('uf-tt-show');
+        });
     }
 
     function hidePopup(el) {
@@ -615,7 +616,7 @@ ruby { ruby-align: center; ruby-position: over; }
 ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-weight: normal; line-height: 1.2; text-align: center; }
 
 /* Info tooltip system — portal-based (tooltip lives outside text flow) */
-.uf-has-info { cursor: help; }
+.uf-has-info { cursor: default; }
 #uf-tooltip-portal { position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 99999; pointer-events: none; overflow: visible; }
 .uf-info-dot {
     font-size: 0.55em;
@@ -626,6 +627,9 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
     pointer-events: none;
     margin-left: 0;
     margin-right: 0;
+    display: inline;
+    width: 0;
+    overflow: visible;
 }
 .uf-info-dot.uf-info-dot-rt {
     vertical-align: middle;
@@ -1668,13 +1672,10 @@ def _on_editor_did_init_buttons(buttons, editor):
 
 def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
-    editor.web.evalWithCallback(
-        "(() => {"
-        "  const s = window.getSelection();"
-        "  return s ? s.toString().trim() : '';"
-        "})()",
-        lambda text: _handle_lookup_result(editor, text)
-    )
+    # Use synchronous selectedText() to avoid stale/cached selection
+    # from previous field or card that evalWithCallback can return.
+    selected = (editor.web.selectedText() or "").strip()
+    _handle_lookup_result(editor, selected)
 
 
 def _handle_lookup_result(editor, selected_text):
