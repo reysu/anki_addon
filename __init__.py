@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10g)
+Universal Furigana Add-on for Anki (v10i)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -62,6 +62,9 @@ _DEFAULT_CONFIG = {
     "furigana_font_size": 0.6,  # em units, relative to base text
     "injected_templates": [],  # list of "NoteType::CardName::side" entries
     "skip_particles": True,  # skip particles (助詞) in sentence mode
+    "color_words_enabled": False,   # master on/off for coloring the base word
+    "color_words_furigana": True,   # color furigana text (already the default behavior)
+    "color_words_kanji": False,     # color the kanji/base text too
 }
 
 
@@ -95,6 +98,7 @@ _SCRIPT_TEMPLATE = r"""
     var COLORS = %%COLORS%%;
     var LINE_PX = %%LINE_PX%%;
     var RT_FONT_SIZE = '%%RT_FONT_SIZE%%';
+    var COLOR_WORDS = %%COLOR_WORDS%%;
 
     // ---- Mora splitter ----
     function splitMora(kana) {
@@ -279,8 +283,12 @@ _SCRIPT_TEMPLATE = r"""
 
                     if (!parsed.reading && parsed.pitch) {
                         var container = document.createElement('span');
+                        var useColor = parsed.pitch.color;
+                        if (COLOR_WORDS.enabled) {
+                            if (!COLOR_WORDS.kanji) useColor = 'inherit';
+                        }
                         container.innerHTML = buildPitchHTML(part.base, parsed.pitch.type,
-                                                            parsed.pitch.drop, parsed.pitch.color);
+                                                            parsed.pitch.drop, useColor);
                         if (parsed.hidden) container.classList.add('uf-hidden');
                         if (parsed.gloss) {
                             wrapWithTooltip(container, parsed.gloss);
@@ -291,15 +299,21 @@ _SCRIPT_TEMPLATE = r"""
                         var rtContent = '';
 
                         if (parsed.pitch && parsed.reading) {
+                            var fgColor = parsed.pitch.color;
+                            if (COLOR_WORDS.enabled && !COLOR_WORDS.furigana) fgColor = 'inherit';
                             rtContent += buildPitchHTML(parsed.reading, parsed.pitch.type,
-                                                       parsed.pitch.drop, parsed.pitch.color);
+                                                       parsed.pitch.drop, fgColor);
                         } else if (parsed.reading) {
                             rtContent += '<span>' + parsed.reading + '</span>';
                         }
 
                         var ruby = document.createElement('ruby');
                         if (parsed.hidden) ruby.classList.add('uf-hidden');
-                        ruby.innerHTML = part.base + '<rt>' + rtContent + '</rt>';
+                        var baseHTML = part.base;
+                        if (COLOR_WORDS.enabled && COLOR_WORDS.kanji && parsed.pitch) {
+                            baseHTML = '<span style="color:' + parsed.pitch.color + '">' + part.base + '</span>';
+                        }
+                        ruby.innerHTML = baseHTML + '<rt>' + rtContent + '</rt>';
 
                         if (parsed.gloss) {
                             // Attach tooltip directly to the ruby element (no wrapper needed)
@@ -716,6 +730,12 @@ def _build_script(cfg):
     script = script.replace("%%LINE_PX%%", thickness)
     rt_size = str(cfg.get("furigana_font_size", 0.6))
     script = script.replace("%%RT_FONT_SIZE%%", rt_size)
+    color_words = json.dumps({
+        "enabled": cfg.get("color_words_enabled", False),
+        "furigana": cfg.get("color_words_furigana", True),
+        "kanji": cfg.get("color_words_kanji", False),
+    })
+    script = script.replace("%%COLOR_WORDS%%", color_words)
     return script
 
 
@@ -1654,6 +1674,18 @@ def _is_sentence(text):
 # Editor integration: toolbar button + lookup
 # ---------------------------------------------------------------------------
 
+def _do_wrap_brackets(editor):
+    """Wrap selected text in 【】 brackets."""
+    editor.web.eval(
+        "(function(){"
+        "  var s = window.getSelection();"
+        "  if (!s || !s.toString()) return;"
+        "  var txt = s.toString();"
+        "  document.execCommand('insertText', false, '\\u3010' + txt + '\\u3011');"
+        "})()"
+    )
+
+
 def _on_editor_did_init_buttons(buttons, editor):
     """Add lookup button to editor toolbar."""
     try:
@@ -1666,6 +1698,15 @@ def _on_editor_did_init_buttons(buttons, editor):
             keys="Ctrl+Shift+F",
         )
         buttons.append(btn)
+        btn2 = editor.addButton(
+            icon=None,
+            cmd="uf_brackets",
+            func=lambda ed: _do_wrap_brackets(ed),
+            tip="Universal Furigana: Wrap in \u3010\u3011 (Ctrl+Shift+B)",
+            label="\u3010\u3011",
+            keys="Ctrl+Shift+B",
+        )
+        buttons.append(btn2)
     except Exception as exc:
         sys.stdout.write("[UF] editor button error: %s\n" % exc)
 
@@ -2586,9 +2627,17 @@ class SettingsDialog(QDialog):
         self.enabled_cb.setChecked(self.cfg.get("enabled", True))
         general_layout.addWidget(self.enabled_cb)
 
+        general_layout.addStretch()
+
+        tabs.addTab(general_tab, "General")
+
+        # ---- Tab 2: Appearance ----
+        appearance_tab = QWidget()
+        appearance_layout = QVBoxLayout(appearance_tab)
+
         self.pitch_cb = QCheckBox("Enable pitch accent visualization")
         self.pitch_cb.setChecked(self.cfg.get("pitch_accent_enabled", True))
-        general_layout.addWidget(self.pitch_cb)
+        appearance_layout.addWidget(self.pitch_cb)
 
         # -- Color settings --
         color_group = QGroupBox("Pitch Accent Colors")
@@ -2609,7 +2658,7 @@ class SettingsDialog(QDialog):
             color_grid.addWidget(lbl, row, 0)
             color_grid.addWidget(btn, row, 1)
 
-        general_layout.addWidget(color_group)
+        appearance_layout.addWidget(color_group)
 
         # -- Furigana font size --
         font_group = QGroupBox("Furigana Font Size")
@@ -2626,71 +2675,39 @@ class SettingsDialog(QDialog):
         )
         font_layout.addWidget(self.font_spin)
         font_layout.addStretch()
-        general_layout.addWidget(font_group)
+        appearance_layout.addWidget(font_group)
 
-        # -- Mobile compatibility: template injection --
-        mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
-        mobile_layout = QVBoxLayout(mobile_group)
+        # -- Word Coloring --
+        color_word_group = QGroupBox("Word Coloring")
+        cw_layout = QVBoxLayout(color_word_group)
 
-        mobile_info = QLabel(
-            "Check the templates below to inject the furigana script directly "
-            "into your card templates. This makes it work on <b>AnkiDroid</b> and "
-            "<b>AnkiMobile (iOS)</b> after syncing.\n\n"
-            "On desktop, the add-on works automatically on all cards even without "
-            "checking anything here."
-        )
-        mobile_info.setWordWrap(True)
-        mobile_layout.addWidget(mobile_info)
+        self.cw_enabled_cb = QCheckBox("Enable pitch-colored words")
+        self.cw_enabled_cb.setChecked(self.cfg.get("color_words_enabled", False))
 
-        # Scrollable area for template checkboxes
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(200)
-        scroll_widget = QWidget()
-        scroll_layout = QVBoxLayout(scroll_widget)
-        scroll_layout.setContentsMargins(4, 4, 4, 4)
+        self.cw_furigana_cb = QCheckBox("Color furigana / reading")
+        self.cw_furigana_cb.setChecked(self.cfg.get("color_words_furigana", True))
 
-        injected_set = set(self.cfg.get("injected_templates", []))
-        self._template_cbs = {}  # key -> QCheckBox
+        self.cw_kanji_cb = QCheckBox("Color kanji / base text")
+        self.cw_kanji_cb.setChecked(self.cfg.get("color_words_kanji", False))
 
-        col = mw.col
-        if col:
-            models = col.models.all()
-            for model in sorted(models, key=lambda m: m["name"]):
-                note_name = model["name"]
-                for tmpl in model["tmpls"]:
-                    tmpl_name = tmpl["name"]
-                    for side, label in [("front", "Front"), ("back", "Back")]:
-                        key = _make_key(note_name, tmpl_name, side)
-                        display = "%s \u2192 %s \u2192 %s" % (
-                            note_name, tmpl_name, label
-                        )
-                        cb = QCheckBox(display)
-                        cb.setChecked(key in injected_set)
-                        scroll_layout.addWidget(cb)
-                        self._template_cbs[key] = cb
+        def _update_cw_state():
+            enabled = self.cw_enabled_cb.isChecked()
+            self.cw_furigana_cb.setEnabled(enabled)
+            self.cw_kanji_cb.setEnabled(enabled)
 
-        scroll_layout.addStretch()
-        scroll.setWidget(scroll_widget)
-        mobile_layout.addWidget(scroll)
+        self.cw_enabled_cb.stateChanged.connect(lambda: _update_cw_state())
+        _update_cw_state()
 
-        # Select all / deselect all
-        sel_layout = QHBoxLayout()
-        sel_all_btn = QPushButton("Select All")
-        sel_all_btn.clicked.connect(self._select_all_templates)
-        desel_all_btn = QPushButton("Deselect All")
-        desel_all_btn.clicked.connect(self._deselect_all_templates)
-        sel_layout.addWidget(sel_all_btn)
-        sel_layout.addWidget(desel_all_btn)
-        sel_layout.addStretch()
-        mobile_layout.addLayout(sel_layout)
+        cw_layout.addWidget(self.cw_enabled_cb)
+        cw_layout.addWidget(self.cw_furigana_cb)
+        cw_layout.addWidget(self.cw_kanji_cb)
 
-        general_layout.addWidget(mobile_group)
-        general_layout.addStretch()
+        appearance_layout.addWidget(color_word_group)
+        appearance_layout.addStretch()
 
-        tabs.addTab(general_tab, "General")
+        tabs.addTab(appearance_tab, "Appearance")
 
-        # ---- Tab 2: Dictionary Lookup ----
+        # ---- Tab 3: Dictionary Lookup ----
         dict_tab = QWidget()
         dict_layout = QVBoxLayout(dict_tab)
 
@@ -2769,6 +2786,71 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(uw_tab, "User Words")
 
+        # ---- Tab 5: Mobile ----
+        mobile_tab = QWidget()
+        mobile_tab_layout = QVBoxLayout(mobile_tab)
+
+        mobile_group = QGroupBox("Mobile Compatibility (AnkiDroid / AnkiMobile)")
+        mobile_layout = QVBoxLayout(mobile_group)
+
+        mobile_info = QLabel(
+            "Check the templates below to inject the furigana script directly "
+            "into your card templates. This makes it work on <b>AnkiDroid</b> and "
+            "<b>AnkiMobile (iOS)</b> after syncing.\n\n"
+            "On desktop, the add-on works automatically on all cards even without "
+            "checking anything here."
+        )
+        mobile_info.setWordWrap(True)
+        mobile_layout.addWidget(mobile_info)
+
+        # Scrollable area for template checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(200)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(4, 4, 4, 4)
+
+        injected_set = set(self.cfg.get("injected_templates", []))
+        self._template_cbs = {}  # key -> QCheckBox
+
+        col = mw.col
+        if col:
+            models = col.models.all()
+            for model in sorted(models, key=lambda m: m["name"]):
+                note_name = model["name"]
+                for tmpl in model["tmpls"]:
+                    tmpl_name = tmpl["name"]
+                    for side, label in [("front", "Front"), ("back", "Back")]:
+                        key = _make_key(note_name, tmpl_name, side)
+                        display = "%s \u2192 %s \u2192 %s" % (
+                            note_name, tmpl_name, label
+                        )
+                        cb = QCheckBox(display)
+                        cb.setChecked(key in injected_set)
+                        scroll_layout.addWidget(cb)
+                        self._template_cbs[key] = cb
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        mobile_layout.addWidget(scroll)
+
+        # Select all / deselect all
+        sel_layout = QHBoxLayout()
+        sel_all_btn = QPushButton("Select All")
+        sel_all_btn.clicked.connect(self._select_all_templates)
+        desel_all_btn = QPushButton("Deselect All")
+        desel_all_btn.clicked.connect(self._deselect_all_templates)
+        sel_layout.addWidget(sel_all_btn)
+        sel_layout.addWidget(desel_all_btn)
+        sel_layout.addStretch()
+        mobile_layout.addLayout(sel_layout)
+
+        mobile_tab_layout.addWidget(mobile_group)
+        mobile_tab_layout.addStretch()
+
+        tabs.addTab(mobile_tab, "Mobile")
+
         # -- Buttons (below tabs) --
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -2801,6 +2883,10 @@ class SettingsDialog(QDialog):
         for key, btn in self._color_buttons.items():
             self.cfg[key] = btn.color()
 
+        self.cfg["color_words_enabled"] = self.cw_enabled_cb.isChecked()
+        self.cfg["color_words_furigana"] = self.cw_furigana_cb.isChecked()
+        self.cfg["color_words_kanji"] = self.cw_kanji_cb.isChecked()
+
         # Collect checked templates
         selected = []
         for key, cb in self._template_cbs.items():
@@ -2823,6 +2909,9 @@ class SettingsDialog(QDialog):
         for key, btn in self._color_buttons.items():
             btn._color = _DEFAULT_CONFIG[key]
             btn._update_style()
+        self.cw_enabled_cb.setChecked(False)
+        self.cw_furigana_cb.setChecked(True)
+        self.cw_kanji_cb.setChecked(False)
         for cb in self._template_cbs.values():
             cb.setChecked(False)
 
