@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10i)
+Universal Furigana Add-on for Anki (v10j)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -1671,6 +1671,60 @@ def _is_sentence(text):
 
 
 # ---------------------------------------------------------------------------
+# Migaku format conversion helpers
+# ---------------------------------------------------------------------------
+
+_MIGAKU_RE = re.compile(r"(\S+?)\[([^\]]*)\]")
+
+# Matches a Migaku space: ASCII space between two characters where at least
+# one side is CJK/kana/fullwidth.
+_MIGAKU_SPACE_RE = re.compile(
+    r"(?<=[\u3000-\u9fff\u3040-\u309f\u30a0-\u30ff\uff00-\uffef]) "
+    r"|"
+    r" (?=[\u3000-\u9fff\u3040-\u309f\u30a0-\u30ff\uff00-\uffef])"
+)
+
+
+def _convert_migaku(text):
+    """Convert Migaku word[reading;pitch] to UF word{reading;pitch} format.
+
+    Handles:
+      word[reading;pitch]   -> word{reading;pitch}
+      word[,dictform;pitch] -> word{;pitch;dictform}  (conjugated)
+      word[;pitch]          -> word{;pitch}            (no reading)
+      word[reading]         -> word{reading}           (no pitch)
+    Also removes Migaku-style spaces between Japanese characters.
+    """
+    def _replace(m):
+        base = m.group(1)
+        inside = m.group(2)
+        # Conjugated form: starts with comma -> ,dictform;pitch
+        if inside.startswith(","):
+            rest = inside[1:]  # strip leading comma
+            parts = rest.split(";", 1)
+            if len(parts) == 2:
+                dictform, pitch = parts
+                return base + "{;" + pitch + ";" + dictform + "}"
+            else:
+                # Only dictform, no pitch
+                return base + "{;;" + rest + "}"
+        else:
+            # Standard: reading;pitch or reading or ;pitch
+            return base + "{" + inside + "}"
+
+    result = _MIGAKU_RE.sub(_replace, text)
+    result = _MIGAKU_SPACE_RE.sub("", result)
+    return result
+
+
+def _strip_migaku(text):
+    """Remove all Migaku [...] annotations and Migaku spaces from text."""
+    result = _MIGAKU_RE.sub(r"\1", text)
+    result = _MIGAKU_SPACE_RE.sub("", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Editor integration: toolbar button + lookup
 # ---------------------------------------------------------------------------
 
@@ -1684,6 +1738,40 @@ def _do_wrap_brackets(editor):
         "  document.execCommand('insertText', false, '\\u3010' + txt + '\\u3011');"
         "})()"
     )
+
+
+def _do_convert_migaku(editor):
+    """Convert Migaku brackets in selected text to UF format."""
+    selected = (editor.web.selectedText() or "").strip()
+    if not selected:
+        return
+    converted = _convert_migaku(selected)
+    if converted != selected:
+        js_text = json.dumps(converted)
+        editor.web.eval(
+            "(function(){"
+            "  var s = window.getSelection();"
+            "  if (!s || !s.toString()) return;"
+            "  document.execCommand('insertText', false, " + js_text + ");"
+            "})()"
+        )
+
+
+def _do_strip_migaku(editor):
+    """Strip all Migaku [...] annotations from selected text."""
+    selected = (editor.web.selectedText() or "").strip()
+    if not selected:
+        return
+    stripped = _strip_migaku(selected)
+    if stripped != selected:
+        js_text = json.dumps(stripped)
+        editor.web.eval(
+            "(function(){"
+            "  var s = window.getSelection();"
+            "  if (!s || !s.toString()) return;"
+            "  document.execCommand('insertText', false, " + js_text + ");"
+            "})()"
+        )
 
 
 def _on_editor_did_init_buttons(buttons, editor):
@@ -1707,6 +1795,22 @@ def _on_editor_did_init_buttons(buttons, editor):
             keys="Ctrl+Shift+B",
         )
         buttons.append(btn2)
+        btn3 = editor.addButton(
+            icon=None,
+            cmd="uf_migaku_convert",
+            func=lambda ed: _do_convert_migaku(ed),
+            tip="Universal Furigana: Convert Migaku [] to UF {}",
+            label="[]\u2192{}",
+        )
+        buttons.append(btn3)
+        btn4 = editor.addButton(
+            icon=None,
+            cmd="uf_migaku_strip",
+            func=lambda ed: _do_strip_migaku(ed),
+            tip="Universal Furigana: Strip Migaku [] annotations",
+            label="[\u00d7]",
+        )
+        buttons.append(btn4)
     except Exception as exc:
         sys.stdout.write("[UF] editor button error: %s\n" % exc)
 
@@ -2921,6 +3025,218 @@ def _open_settings():
     dialog.exec()
 
 
-# -- Menu item --
+# ---------------------------------------------------------------------------
+# Bulk Migaku conversion dialog
+# ---------------------------------------------------------------------------
+
+class _BulkMigakuDialog(QDialog):
+    """Dialog to bulk-convert or strip Migaku annotations across notes."""
+
+    def __init__(self, parent, mode="convert"):
+        super().__init__(parent)
+        self._mode = mode  # "convert" or "strip"
+        if mode == "convert":
+            self.setWindowTitle("Bulk Convert Migaku -> UF")
+        else:
+            self.setWindowTitle("Bulk Strip Migaku Annotations")
+        self.setMinimumSize(600, 500)
+        self._matched_nids = []
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Search section
+        search_group = QGroupBox("Search")
+        sg_layout = QVBoxLayout(search_group)
+        sg_layout.addWidget(QLabel(
+            "Enter an Anki search query to find notes with Migaku annotations.\n"
+            "Leave empty to search all notes."
+        ))
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("e.g.  deck:Japanese  or  tag:migaku")
+        sg_layout.addWidget(self._search_edit)
+        self._search_btn = QPushButton("Search")
+        self._search_btn.clicked.connect(self._on_search)
+        sg_layout.addWidget(self._search_btn)
+        layout.addWidget(search_group)
+
+        # Preview section
+        preview_group = QGroupBox("Preview")
+        pg_layout = QVBoxLayout(preview_group)
+        self._preview_text = QTextEdit()
+        self._preview_text.setReadOnly(True)
+        pg_layout.addWidget(self._preview_text)
+        layout.addWidget(preview_group)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._on_apply)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self._apply_btn)
+        cancel_btn = QPushButton("Close")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_search(self):
+        """Search for notes containing Migaku annotations."""
+        query = self._search_edit.text().strip()
+        col = mw.col
+        if not col:
+            return
+
+        # Find note IDs matching query
+        try:
+            if query:
+                nids = col.find_notes(query)
+            else:
+                nids = col.find_notes("")
+        except Exception as exc:
+            self._preview_text.setPlainText("Search error: %s" % exc)
+            return
+
+        # Filter to notes that actually contain Migaku brackets
+        migaku_re = _MIGAKU_RE
+        matched = []
+        previews = []
+        for nid in nids:
+            note = col.get_note(nid)
+            for fld_name, fld_val in zip(note.keys(), note.values()):
+                if migaku_re.search(fld_val):
+                    matched.append(nid)
+                    # Show first few previews
+                    if len(previews) < 50:
+                        if self._mode == "convert":
+                            after = _convert_migaku(fld_val)
+                        else:
+                            after = _strip_migaku(fld_val)
+                        if after != fld_val:
+                            previews.append(
+                                "nid %d [%s]:\n  BEFORE: %s\n  AFTER:  %s"
+                                % (nid, fld_name, fld_val[:200], after[:200])
+                            )
+                    break  # only count each note once
+
+        self._matched_nids = list(set(matched))
+
+        if not self._matched_nids:
+            self._preview_text.setPlainText(
+                "No notes with Migaku annotations found."
+            )
+            self._apply_btn.setEnabled(False)
+            return
+
+        header = "Found %d notes with Migaku annotations.\n\n" % len(
+            self._matched_nids
+        )
+        if previews:
+            header += "Preview (first %d changes):\n\n" % len(previews)
+        self._preview_text.setPlainText(header + "\n\n".join(previews))
+        self._apply_btn.setEnabled(True)
+
+    def _on_apply(self):
+        """Apply conversion/stripping to all matched notes."""
+        if not self._matched_nids:
+            return
+
+        col = mw.col
+        if not col:
+            return
+
+        # Confirmation dialog
+        action_word = "convert" if self._mode == "convert" else "strip"
+        reply = QMessageBox.question(
+            self,
+            "Confirm Bulk %s" % action_word.title(),
+            "This will %s Migaku annotations in %d notes.\n\n"
+            "This action can be undone with Edit \u2192 Undo.\n\n"
+            "Continue?" % (action_word, len(self._matched_nids)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Set up undo
+        undo_label = (
+            "Bulk Migaku Convert" if self._mode == "convert"
+            else "Bulk Migaku Strip"
+        )
+        try:
+            undo_entry = col.add_custom_undo_entry(undo_label)
+        except AttributeError:
+            # Older Anki without new undo API
+            try:
+                mw.checkpoint(undo_label)
+            except Exception:
+                pass
+            undo_entry = None
+
+        convert_fn = _convert_migaku if self._mode == "convert" else _strip_migaku
+
+        progress = QProgressDialog(
+            "Processing notes...", "Cancel", 0, len(self._matched_nids), self
+        )
+        progress.setWindowTitle(undo_label)
+        progress.setMinimumDuration(0)
+
+        changed_count = 0
+        for i, nid in enumerate(self._matched_nids):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            QApplication.processEvents()
+
+            note = col.get_note(nid)
+            modified = False
+            for idx, val in enumerate(note.values()):
+                new_val = convert_fn(val)
+                if new_val != val:
+                    note.fields[idx] = new_val
+                    modified = True
+            if modified:
+                col.update_note(note)
+                changed_count += 1
+
+        progress.setValue(len(self._matched_nids))
+
+        # Merge undo entries if available
+        if undo_entry is not None:
+            try:
+                col.merge_undo_entries(undo_entry)
+            except Exception:
+                pass
+
+        from aqt.utils import showInfo
+        showInfo(
+            "Done! Modified %d of %d notes.\n\n"
+            "Use Edit > Undo to revert."
+            % (changed_count, len(self._matched_nids))
+        )
+        self._apply_btn.setEnabled(False)
+        self._matched_nids = []
+        self._preview_text.clear()
+
+
+def _bulk_migaku_convert():
+    """Open bulk Migaku convert dialog."""
+    dialog = _BulkMigakuDialog(mw, mode="convert")
+    dialog.exec()
+
+
+def _bulk_migaku_strip():
+    """Open bulk Migaku strip dialog."""
+    dialog = _BulkMigakuDialog(mw, mode="strip")
+    dialog.exec()
+
+
+# -- Menu items --
 _action = mw.form.menuTools.addAction("Universal Furigana Settings\u2026")
 _action.triggered.connect(_open_settings)
+_action2 = mw.form.menuTools.addAction("UF: Bulk Convert Migaku \u2192 UF\u2026")
+_action2.triggered.connect(_bulk_migaku_convert)
+_action3 = mw.form.menuTools.addAction("UF: Bulk Strip Migaku Annotations\u2026")
+_action3.triggered.connect(_bulk_migaku_strip)
