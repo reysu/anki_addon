@@ -1890,12 +1890,22 @@ def _handle_lookup_result(editor, selected_text):
         # Save user edits to user_words.json
         dialog.save_user_edit()
         annotation = dialog.get_annotation()
-        if annotation and editor.note is not None and field_idx is not None:
-            field_html = editor.note.fields[field_idx]
-            spaced = _insert_with_spaces(field_html, selected_text, annotation)
-            if spaced != field_html:
-                editor.note.fields[field_idx] = spaced
-                editor.loadNoteKeepingFocus()
+        if annotation:
+            # Use execCommand to replace the *currently selected* text
+            # in the editor webview.  This respects the cursor position
+            # so if the same word appears multiple times only the
+            # highlighted occurrence is replaced.
+            js_ann = json.dumps(annotation)
+            editor.web.eval(
+                "(function(){"
+                "  var s = window.getSelection();"
+                "  if (s && s.rangeCount && s.toString()) {"
+                "    document.execCommand('insertText', false, " + js_ann + ");"
+                "  }"
+                "})()"
+            )
+            # Sync the webview change back into the note object
+            editor.saveNow(lambda: None)
 
 
 def _insert_with_spaces(html, old, new):
@@ -1990,12 +2000,20 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
         # Save any user edits to user_words.json
         dialog.save_user_edits()
         annotated = dialog.get_annotated_sentence()
-        if annotated and editor.note is not None and field_idx is not None:
-            field_html = editor.note.fields[field_idx]
-            new_html = field_html.replace(sentence, annotated, 1)
-            if new_html != field_html:
-                editor.note.fields[field_idx] = new_html
-                editor.loadNoteKeepingFocus()
+        if annotated:
+            # Use execCommand to replace the *currently selected* text
+            # so the correct occurrence is targeted when duplicates exist.
+            js_ann = json.dumps(annotated)
+            editor.web.eval(
+                "(function(){"
+                "  var s = window.getSelection();"
+                "  if (s && s.rangeCount && s.toString()) {"
+                "    document.execCommand('insertText', false, " + js_ann + ");"
+                "  }"
+                "})()"
+            )
+            # Sync the webview change back into the note object
+            editor.saveNow(lambda: None)
 
 
 class _SentenceLookupDialog(QDialog):
