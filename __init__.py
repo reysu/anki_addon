@@ -697,10 +697,11 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 /* Night / dark mode overrides
    Force white text for ruby elements so they are visible on dark
    backgrounds even when the parent element lacks a color override.
-   Pitch-accented text keeps its inline color (set in settings). */
-.night_mode ruby { color: #fff; }
-.night_mode ruby rt { color: #fff; }
-.night_mode .uf-info-dot { color: #fff; opacity: 0.5; }
+   Pitch-accented text keeps its inline color (set in settings).
+   Anki desktop uses .nightMode (camelCase), AnkiDroid uses .night_mode. */
+.nightMode ruby, .night_mode ruby { color: #fff !important; }
+.nightMode ruby rt, .night_mode ruby rt { color: #fff !important; }
+.nightMode .uf-info-dot, .night_mode .uf-info-dot { color: #fff !important; opacity: 0.5; }
 
 /* Hidden furigana (! prefix) — blurred until hover/tap */
 .uf-hidden rt,
