@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10j)
+Universal Furigana Add-on for Anki (v10k)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -693,6 +693,13 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 }
 .uf-tt-prev:active, .uf-tt-next:active { background: rgba(255,255,255,0.18); }
 .uf-tt-info { color: #999; font-size: 11px; }
+
+/* Night / dark mode overrides
+   Ensure non-pitch furigana and info dots adapt to dark backgrounds.
+   Pitch-accented text keeps its color (set in settings). */
+.night_mode ruby { color: inherit; }
+.night_mode ruby rt { color: inherit; }
+.night_mode .uf-info-dot { color: inherit; opacity: 0.5; }
 
 /* Hidden furigana (! prefix) — blurred until hover/tap */
 .uf-hidden rt,
@@ -1712,9 +1719,9 @@ def _convert_migaku(text):
             # Standard: reading;pitch or reading or ;pitch
             return base + "{" + inside + "}"
 
-    result = _MIGAKU_RE.sub(_replace, text)
-    result = _MIGAKU_SPACE_RE.sub("", result)
-    return result
+    # Convert brackets only.  Keep all Migaku spaces — they serve as
+    # word boundaries that UF needs to separate annotations.
+    return _MIGAKU_RE.sub(_replace, text)
 
 
 def _strip_migaku(text):
@@ -1865,23 +1872,8 @@ def _handle_lookup_result(editor, selected_text):
                 if result["reading"] is None:
                     result["reading"] = content[0]["reading"]
 
-    if (not result["reading"] and not result["pitch_code"]
-            and not result["all_definitions"]):
-        from aqt.utils import showInfo
-        msg = "No results found for: %s" % selected_text
-        if not _check_mecab():
-            msg += (
-                "\n\nMeCab could not be loaded on this system.\n"
-                "Sentence mode may not be available."
-            )
-        else:
-            msg += (
-                "\n\nMake sure you have dictionaries imported.\n"
-                "(Tools \u2192 Universal Furigana Settings "
-                "\u2192 Dictionary Lookup tab)"
-            )
-        showInfo(msg)
-        return
+    # Even if no results found, open the dialog so the user can
+    # manually enter reading / pitch / definition.
 
     dialog = _LookupPreviewDialog(
         editor.parentWindow, selected_text, result
@@ -1895,13 +1887,25 @@ def _handle_lookup_result(editor, selected_text):
             # in the editor webview.  This respects the cursor position
             # so if the same word appears multiple times only the
             # highlighted occurrence is replaced.
+            #
+            # We also add a space before/after the annotation when the
+            # neighbouring character is not already a space or tag boundary,
+            # so {annotations} don't merge into adjacent text.
             js_ann = json.dumps(annotation)
             editor.web.eval(
                 "(function(){"
                 "  var s = window.getSelection();"
-                "  if (s && s.rangeCount && s.toString()) {"
-                "    document.execCommand('insertText', false, " + js_ann + ");"
-                "  }"
+                "  if (!s || !s.rangeCount || !s.toString()) return;"
+                "  var r = s.getRangeAt(0);"
+                "  var txt = " + js_ann + ";"
+                "  var before = r.startContainer.nodeType === 3"
+                "    ? r.startContainer.textContent.charAt(r.startOffset - 1) : '';"
+                "  var after = r.endContainer.nodeType === 3"
+                "    ? r.endContainer.textContent.charAt(r.endOffset) : '';"
+                "  var ws = ' \\t\\n';"
+                "  if (before && ws.indexOf(before) === -1 && before !== '>') txt = ' ' + txt;"
+                "  if (after && ws.indexOf(after) === -1 && after !== '<') txt = txt + ' ';"
+                "  document.execCommand('insertText', false, txt);"
                 "})()"
             )
             # Sync the webview change back into the note object
@@ -2007,9 +2011,17 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
             editor.web.eval(
                 "(function(){"
                 "  var s = window.getSelection();"
-                "  if (s && s.rangeCount && s.toString()) {"
-                "    document.execCommand('insertText', false, " + js_ann + ");"
-                "  }"
+                "  if (!s || !s.rangeCount || !s.toString()) return;"
+                "  var r = s.getRangeAt(0);"
+                "  var txt = " + js_ann + ";"
+                "  var before = r.startContainer.nodeType === 3"
+                "    ? r.startContainer.textContent.charAt(r.startOffset - 1) : '';"
+                "  var after = r.endContainer.nodeType === 3"
+                "    ? r.endContainer.textContent.charAt(r.endOffset) : '';"
+                "  var ws = ' \\t\\n';"
+                "  if (before && ws.indexOf(before) === -1 && before !== '>') txt = ' ' + txt;"
+                "  if (after && ws.indexOf(after) === -1 && after !== '<') txt = txt + ' ';"
+                "  document.execCommand('insertText', false, txt);"
                 "})()"
             )
             # Sync the webview change back into the note object
