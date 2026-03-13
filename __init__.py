@@ -100,6 +100,29 @@ _SCRIPT_TEMPLATE = r"""
     var RT_FONT_SIZE = '%%RT_FONT_SIZE%%';
     var COLOR_WORDS = %%COLOR_WORDS%%;
 
+    // ---- Dark mode detection ----
+    function isDarkMode() {
+        var b = document.body;
+        if (!b) return false;
+        if (b.classList.contains('nightMode') || b.classList.contains('night_mode')) return true;
+        // Check ancestors (AnkiDroid sometimes puts class higher up)
+        var el = b.parentElement;
+        while (el) {
+            if (el.classList && (el.classList.contains('nightMode') || el.classList.contains('night_mode'))) return true;
+            el = el.parentElement;
+        }
+        // Fallback: check computed background color brightness
+        var bg = window.getComputedStyle(b).backgroundColor;
+        if (bg) {
+            var m = bg.match(/\d+/g);
+            if (m && m.length >= 3) {
+                var lum = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2];
+                if (lum < 80) return true;
+            }
+        }
+        return false;
+    }
+
     // ---- Mora splitter ----
     function splitMora(kana) {
         var digraphs = '\u3083\u3085\u3087\u30e3\u30e5\u30e7\u30a1\u30a3\u30a5\u30a7\u30a9';
@@ -312,6 +335,8 @@ _SCRIPT_TEMPLATE = r"""
                         var baseHTML = part.base;
                         if (COLOR_WORDS.enabled && COLOR_WORDS.kanji && parsed.pitch) {
                             baseHTML = '<span style="color:' + parsed.pitch.color + '">' + part.base + '</span>';
+                        } else if (isDarkMode()) {
+                            ruby.style.color = '#fff';
                         }
                         ruby.innerHTML = baseHTML + '<rt>' + rtContent + '</rt>';
 
