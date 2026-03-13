@@ -1783,44 +1783,44 @@ def _do_strip_migaku(editor):
 
 
 def _on_editor_did_init_buttons(buttons, editor):
-    """Add lookup button to editor toolbar."""
-    try:
-        btn = editor.addButton(
-            icon=None,
+    """Add toolbar buttons to the editor.  Each button is in its own
+    try/except so a failure in one doesn't prevent the rest from loading."""
+    _button_defs = [
+        dict(
             cmd="uf_lookup",
             func=lambda ed: _do_lookup(ed),
             tip="Universal Furigana: Dictionary Lookup (Ctrl+Shift+F)",
             label="UF\u8f9e",
             keys="Ctrl+Shift+F",
-        )
-        buttons.append(btn)
-        btn2 = editor.addButton(
-            icon=None,
+        ),
+        dict(
             cmd="uf_brackets",
             func=lambda ed: _do_wrap_brackets(ed),
             tip="Universal Furigana: Wrap in \u3010\u3011 (Ctrl+Shift+B)",
             label="\u3010\u3011",
             keys="Ctrl+Shift+B",
-        )
-        buttons.append(btn2)
-        btn3 = editor.addButton(
-            icon=None,
+        ),
+        dict(
             cmd="uf_migaku_convert",
             func=lambda ed: _do_convert_migaku(ed),
             tip="Universal Furigana: Convert Migaku [] to UF {}",
             label="[]\u2192{}",
-        )
-        buttons.append(btn3)
-        btn4 = editor.addButton(
-            icon=None,
+        ),
+        dict(
             cmd="uf_migaku_strip",
             func=lambda ed: _do_strip_migaku(ed),
             tip="Universal Furigana: Strip Migaku [] annotations",
             label="[\u00d7]",
-        )
-        buttons.append(btn4)
-    except Exception as exc:
-        sys.stdout.write("[UF] editor button error: %s\n" % exc)
+        ),
+    ]
+    for bdef in _button_defs:
+        try:
+            b = editor.addButton(icon=None, **bdef)
+            buttons.append(b)
+        except Exception as exc:
+            sys.stdout.write(
+                "[UF] editor button '%s' error: %s\n" % (bdef.get('cmd', '?'), exc)
+            )
 
 
 def _do_lookup(editor):
@@ -1888,25 +1888,15 @@ def _handle_lookup_result(editor, selected_text):
             # in the editor webview.  This respects the cursor position
             # so if the same word appears multiple times only the
             # highlighted occurrence is replaced.
-            #
-            # We also add a space before/after the annotation when the
-            # neighbouring character is not already a space or tag boundary,
-            # so {annotations} don't merge into adjacent text.
-            js_ann = json.dumps(annotation)
+            # Pad with spaces so the annotation doesn't merge into
+            # adjacent text.  Double spaces are harmless.
+            padded = " " + annotation + " "
+            js_ann = json.dumps(padded)
             editor.web.eval(
                 "(function(){"
                 "  var s = window.getSelection();"
                 "  if (!s || !s.rangeCount || !s.toString()) return;"
-                "  var r = s.getRangeAt(0);"
-                "  var txt = " + js_ann + ";"
-                "  var before = r.startContainer.nodeType === 3"
-                "    ? r.startContainer.textContent.charAt(r.startOffset - 1) : '';"
-                "  var after = r.endContainer.nodeType === 3"
-                "    ? r.endContainer.textContent.charAt(r.endOffset) : '';"
-                "  var ws = ' \\t\\n';"
-                "  if (before && ws.indexOf(before) === -1 && before !== '>') txt = ' ' + txt;"
-                "  if (after && ws.indexOf(after) === -1 && after !== '<') txt = txt + ' ';"
-                "  document.execCommand('insertText', false, txt);"
+                "  document.execCommand('insertText', false, " + js_ann + ");"
                 "})()"
             )
             # Sync the webview change back into the note object
@@ -2008,21 +1998,13 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
         if annotated:
             # Use execCommand to replace the *currently selected* text
             # so the correct occurrence is targeted when duplicates exist.
-            js_ann = json.dumps(annotated)
+            padded = " " + annotated + " "
+            js_ann = json.dumps(padded)
             editor.web.eval(
                 "(function(){"
                 "  var s = window.getSelection();"
                 "  if (!s || !s.rangeCount || !s.toString()) return;"
-                "  var r = s.getRangeAt(0);"
-                "  var txt = " + js_ann + ";"
-                "  var before = r.startContainer.nodeType === 3"
-                "    ? r.startContainer.textContent.charAt(r.startOffset - 1) : '';"
-                "  var after = r.endContainer.nodeType === 3"
-                "    ? r.endContainer.textContent.charAt(r.endOffset) : '';"
-                "  var ws = ' \\t\\n';"
-                "  if (before && ws.indexOf(before) === -1 && before !== '>') txt = ' ' + txt;"
-                "  if (after && ws.indexOf(after) === -1 && after !== '<') txt = txt + ' ';"
-                "  document.execCommand('insertText', false, txt);"
+                "  document.execCommand('insertText', false, " + js_ann + ");"
                 "})()"
             )
             # Sync the webview change back into the note object
