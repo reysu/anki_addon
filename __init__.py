@@ -695,11 +695,12 @@ ruby rt { font-size: %%RT_FONT_SIZE%%em; color: inherit; opacity: 0.85; font-wei
 .uf-tt-info { color: #999; font-size: 11px; }
 
 /* Night / dark mode overrides
-   Ensure non-pitch furigana and info dots adapt to dark backgrounds.
-   Pitch-accented text keeps its color (set in settings). */
-.night_mode ruby { color: inherit; }
-.night_mode ruby rt { color: inherit; }
-.night_mode .uf-info-dot { color: inherit; opacity: 0.5; }
+   Force white text for ruby elements so they are visible on dark
+   backgrounds even when the parent element lacks a color override.
+   Pitch-accented text keeps its inline color (set in settings). */
+.night_mode ruby { color: #fff; }
+.night_mode ruby rt { color: #fff; }
+.night_mode .uf-info-dot { color: #fff; opacity: 0.5; }
 
 /* Hidden furigana (! prefix) — blurred until hover/tap */
 .uf-hidden rt,
