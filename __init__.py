@@ -1949,6 +1949,48 @@ def _insert_with_spaces(html, old, new):
 
 
 # ---------------------------------------------------------------------------
+# Single-word dialog helper (used when user wants to treat selection as one word)
+# ---------------------------------------------------------------------------
+
+def _open_single_word_dialog(editor, word):
+    """Open the single-word LookupPreviewDialog for *word*.
+
+    Looks up the word in the dictionary first; if nothing is found the
+    dialog still opens with empty fields so the user can type manually.
+    """
+    db = _get_dict_db()
+    result = db.lookup_all(word)
+
+    # Also try lemma via MeCab if no hit on the surface
+    if (not result["reading"] and not result["pitch_code"]
+            and not result["all_definitions"] and _check_mecab()):
+        tokens = _tokenize_sentence(word)
+        content = [t for t in tokens if not t["skip"]]
+        if len(content) == 1 and content[0]["lemma"] != word:
+            lemma_result = db.lookup_all(content[0]["lemma"])
+            if lemma_result["reading"] or lemma_result["pitch_code"]:
+                result = lemma_result
+            if not result["reading"] and content[0]["reading"]:
+                result["reading"] = content[0]["reading"]
+
+    dialog = _LookupPreviewDialog(editor.parentWindow, word, result)
+    if dialog.exec():
+        dialog.save_user_edit()
+        annotation = dialog.get_annotation()
+        if annotation:
+            padded = " " + annotation + " "
+            js_ann = json.dumps(padded)
+            editor.web.eval(
+                "(function(){"
+                "  var s = window.getSelection();"
+                "  if (!s || !s.rangeCount || !s.toString()) return;"
+                "  document.execCommand('insertText', false, " + js_ann + ");"
+                "})()"
+            )
+            editor.saveNow(lambda: None)
+
+
+# ---------------------------------------------------------------------------
 # Sentence lookup: tokenize → lookup each word → preview all
 # ---------------------------------------------------------------------------
 
@@ -2004,20 +2046,20 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
     # Check if we found anything at all
     any_found = any(w["enabled"] for w in word_results)
     if not any_found:
-        from aqt.utils import showInfo
-        showInfo(
-            "No dictionary results found for any word "
-            "in the selected text.\n\n"
-            "Make sure you have dictionaries imported.\n"
-            "(Tools \u2192 Universal Furigana Settings "
-            "\u2192 Dictionary Lookup tab)"
-        )
+        # No sentence results — fall through to single-word mode
+        # so the user can manually annotate the full selection.
+        _open_single_word_dialog(editor, sentence)
         return
 
     dialog = _SentenceLookupDialog(
         editor.parentWindow, sentence, word_results
     )
-    if dialog.exec():
+    ret = dialog.exec()
+    if getattr(dialog, "use_single_word", False):
+        # User clicked "Single Word" — open the single-word dialog
+        _open_single_word_dialog(editor, sentence)
+        return
+    if ret:
         # Save any user edits to user_words.json
         dialog.save_user_edits()
         annotated = dialog.get_annotated_sentence()
@@ -2175,8 +2217,14 @@ class _SentenceLookupDialog(QDialog):
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
 
-        # Buttons (no preview)
+        # Buttons
         bl = QHBoxLayout()
+        single_btn = QPushButton("Single Word")
+        single_btn.setToolTip(
+            "Treat the entire selection as one word instead of a sentence"
+        )
+        single_btn.clicked.connect(self._use_single_word)
+        bl.addWidget(single_btn)
         bl.addStretch()
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
@@ -2186,6 +2234,11 @@ class _SentenceLookupDialog(QDialog):
         bl.addWidget(cancel_btn)
         bl.addWidget(insert_btn)
         layout.addLayout(bl)
+
+    def _use_single_word(self):
+        """Signal that the user wants single-word mode instead."""
+        self.use_single_word = True
+        self.reject()
 
     def save_user_edits(self):
         """Save any row where the user changed reading/pitch/tooltip."""
