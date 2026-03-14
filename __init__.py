@@ -251,6 +251,8 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     // ---- Main conversion ----
+    var _cachedDarkMode = false;
+    var _ufProcessing = false;
     function convertFurigana(rootNode) {
         var walker = document.createTreeWalker(
             rootNode,
@@ -339,7 +341,7 @@ _SCRIPT_TEMPLATE = r"""
                         var baseHTML = part.base;
                         if (COLOR_WORDS.enabled && COLOR_WORDS.kanji && parsed.pitch) {
                             baseHTML = '<span style="color:' + parsed.pitch.color + '">' + part.base + '</span>';
-                        } else if (isDarkMode()) {
+                        } else if (_cachedDarkMode) {
                             ruby.style.color = '#fff';
                         }
                         ruby.innerHTML = baseHTML + '<rt>' + rtContent + '</rt>';
@@ -364,6 +366,7 @@ _SCRIPT_TEMPLATE = r"""
     // ---- Tooltip with pagination (portal-based to avoid layout shift) ----
     var CHARS_PER_PAGE = 120;
     var _ufTooltipId = 0;
+    var _ufPageCache = {};
 
     // Get or create the portal container for tooltips (lives outside text flow)
     function getTooltipPortal() {
@@ -399,7 +402,7 @@ _SCRIPT_TEMPLATE = r"""
         popup.id = tooltipId;
 
         var pages = paginate(text);
-        popup.setAttribute('data-pages', JSON.stringify(pages));
+        _ufPageCache[tooltipId] = pages;
         popup.setAttribute('data-page', '0');
 
         var body = document.createElement('div');
@@ -429,43 +432,10 @@ _SCRIPT_TEMPLATE = r"""
 
         // Append to portal, NOT inside the word element
         getTooltipPortal().appendChild(popup);
-
-        // Direct touch handlers for mobile.
-        // We track touch position so only genuine taps toggle the tooltip
-        // (not swipes/scrolls), and we call stopPropagation to prevent
-        // AnkiDroid from interpreting the tap as a card-advance gesture.
-        var _touchStartX = 0, _touchStartY = 0;
-        el.addEventListener('touchstart', function(ev) {
-            var t = ev.changedTouches[0];
-            _touchStartX = t.clientX;
-            _touchStartY = t.clientY;
-        }, { passive: true });
-        el.addEventListener('touchend', function(ev) {
-            // Let nav arrow taps through without toggling
-            if (ev.target.closest('.uf-tt-prev, .uf-tt-next')) return;
-            // Ignore swipes (moved > 15px)
-            var t = ev.changedTouches[0];
-            var dx = Math.abs(t.clientX - _touchStartX);
-            var dy = Math.abs(t.clientY - _touchStartY);
-            if (dx > 15 || dy > 15) return;
-            ev.preventDefault();
-            ev.stopPropagation();
-            var tid = this.getAttribute('data-uf-tt');
-            var p = document.getElementById(tid);
-            if (!p) return;
-            if (p.classList.contains('uf-tt-show')) {
-                _tt.pinned = null;
-                hidePopup(this);
-            } else {
-                _tt.pinned = this;
-                hideAllPopups();
-                showPopup(this);
-            }
-        });
     }
 
     function ufNavPage(popup, dir) {
-        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var pages = _ufPageCache[popup.id] || [];
         var idx = parseInt(popup.getAttribute('data-page'), 10);
         idx += dir;
         if (idx < 0) idx = 0;
@@ -497,7 +467,7 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     function renderPage(popup) {
-        var pages = JSON.parse(popup.getAttribute('data-pages'));
+        var pages = _ufPageCache[popup.id] || [];
         var idx = parseInt(popup.getAttribute('data-page'), 10);
         var body = popup.querySelector('.uf-tt-body');
         body.textContent = pages[idx];
@@ -523,21 +493,23 @@ _SCRIPT_TEMPLATE = r"""
         // doesn't force a synchronous reflow (which causes 1px jitter).
         requestAnimationFrame(function() {
             var elRect = el.getBoundingClientRect();
-            popup.style.left = elRect.left + 'px';
-            popup.style.top = (elRect.bottom + 2) + 'px';
-            var pRect = popup.getBoundingClientRect();
-            if (pRect.right > window.innerWidth - 4) {
-                popup.style.left = Math.max(4, window.innerWidth - pRect.width - 4) + 'px';
-            }
-            pRect = popup.getBoundingClientRect();
-            if (pRect.left < 4) {
-                popup.style.left = '4px';
-            }
-            pRect = popup.getBoundingClientRect();
-            if (pRect.bottom > window.innerHeight) {
-                popup.style.top = (elRect.top - pRect.height - 2) + 'px';
-            }
+            var vw = window.innerWidth;
+            var vh = window.innerHeight;
+            // Make popup visible but off-screen to measure its size once
+            popup.style.left = '0px';
+            popup.style.top = '0px';
             popup.classList.add('uf-tt-show');
+            var pRect = popup.getBoundingClientRect();
+            var pw = pRect.width;
+            var ph = pRect.height;
+            // Compute final position in one pass — no intermediate reflows
+            var left = elRect.left;
+            if (left + pw > vw - 4) left = Math.max(4, vw - pw - 4);
+            if (left < 4) left = 4;
+            var top = elRect.bottom + 2;
+            if (top + ph > vh) top = elRect.top - ph - 2;
+            popup.style.left = left + 'px';
+            popup.style.top = top + 'px';
         });
     }
 
@@ -549,7 +521,7 @@ _SCRIPT_TEMPLATE = r"""
     }
 
     function hideAllPopups() {
-        var popups = document.getElementsByClassName('uf-tooltip');
+        var popups = document.querySelectorAll('.uf-tt-show');
         for (var i = 0; i < popups.length; i++) {
             popups[i].classList.remove('uf-tt-show');
         }
@@ -617,11 +589,41 @@ _SCRIPT_TEMPLATE = r"""
             }
         });
 
-        // Mobile: tap outside to dismiss all popups
+        // Mobile: delegated touch handlers (single pair for all tooltips)
+        var _touchStartX = 0, _touchStartY = 0;
+        document.body.addEventListener('touchstart', function(e) {
+            var t = e.changedTouches[0];
+            _touchStartX = t.clientX;
+            _touchStartY = t.clientY;
+        }, { passive: true });
         document.body.addEventListener('touchend', function(e) {
-            if (!e.target.closest('.uf-has-info') && !e.target.closest('.uf-tooltip')) {
+            // Tap outside any tooltip word — dismiss all
+            var el = e.target.closest('.uf-has-info');
+            if (!el && !e.target.closest('.uf-tooltip')) {
                 _tt.pinned = null;
                 hideAllPopups();
+                return;
+            }
+            if (!el) return;
+            // Let nav arrow taps through
+            if (e.target.closest('.uf-tt-prev, .uf-tt-next')) return;
+            // Ignore swipes (moved > 15px)
+            var t = e.changedTouches[0];
+            var dx = Math.abs(t.clientX - _touchStartX);
+            var dy = Math.abs(t.clientY - _touchStartY);
+            if (dx > 15 || dy > 15) return;
+            e.preventDefault();
+            e.stopPropagation();
+            var tid = el.getAttribute('data-uf-tt');
+            var p = document.getElementById(tid);
+            if (!p) return;
+            if (p.classList.contains('uf-tt-show')) {
+                _tt.pinned = null;
+                hidePopup(el);
+            } else {
+                _tt.pinned = el;
+                hideAllPopups();
+                showPopup(el);
             }
         });
 
@@ -643,20 +645,36 @@ _SCRIPT_TEMPLATE = r"""
         _tt.hoverEl = null;
         if (_tt.hoverTimer) { clearTimeout(_tt.hoverTimer); _tt.hoverTimer = null; }
         _ufTooltipId = 0;
+        _ufPageCache = {};
+        _cachedDarkMode = isDarkMode();
 
-        var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
-        var done = false;
-        for (var s = 0; s < sels.length; s++) {
-            var els = document.querySelectorAll(sels[s]);
-            for (var i = 0; i < els.length; i++) {
-                if (els[i].textContent.indexOf('{') !== -1) {
-                    convertFurigana(els[i]);
-                    done = true;
+        _ufProcessing = true;
+        try {
+            var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
+            var processed = new Set();
+            var done = false;
+            for (var s = 0; s < sels.length; s++) {
+                var els = document.querySelectorAll(sels[s]);
+                for (var i = 0; i < els.length; i++) {
+                    var el = els[i];
+                    // Skip if this element is inside (or is) one we already processed
+                    var dominated = false;
+                    processed.forEach(function(prev) {
+                        if (prev.contains(el)) dominated = true;
+                    });
+                    if (dominated) continue;
+                    if (el.textContent.indexOf('{') !== -1) {
+                        convertFurigana(el);
+                        processed.add(el);
+                        done = true;
+                    }
                 }
             }
-        }
-        if (!done && document.body && document.body.textContent.indexOf('{') !== -1) {
-            convertFurigana(document.body);
+            if (!done && document.body && document.body.textContent.indexOf('{') !== -1) {
+                convertFurigana(document.body);
+            }
+        } finally {
+            _ufProcessing = false;
         }
     }
 
@@ -669,6 +687,7 @@ _SCRIPT_TEMPLATE = r"""
     if (_ufFirstLoad && typeof MutationObserver !== 'undefined') {
         var _seen = new WeakSet();
         new MutationObserver(function(muts) {
+            if (_ufProcessing) return;
             for (var m = 0; m < muts.length; m++) {
                 var nodes = muts[m].addedNodes;
                 for (var n = 0; n < nodes.length; n++) {
@@ -1883,6 +1902,32 @@ def _on_editor_did_init_buttons(buttons, editor):
                 "[UF] editor button '%s' error: %s\n" % (bdef.get('cmd', '?'), exc)
             )
 
+    # Register keyboard shortcuts via JS in the editor webview.
+    # The addButton 'keys' parameter is unreliable in some Anki versions,
+    # so we inject a keydown listener that calls pycmd() to trigger lookups.
+    try:
+        editor.web.eval(r"""
+            if (!window._ufKeysReady) {
+                window._ufKeysReady = true;
+                document.addEventListener('keydown', function(e) {
+                    // Ctrl+Shift+F (or Cmd+Shift+F on macOS)
+                    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        pycmd('uf_lookup');
+                    }
+                    // Ctrl+Shift+B (or Cmd+Shift+B on macOS)
+                    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'B') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        pycmd('uf_brackets');
+                    }
+                }, true);
+            }
+        """)
+    except Exception:
+        pass
+
 
 def _do_lookup(editor):
     """Perform dictionary lookup on selected text in editor."""
@@ -2502,6 +2547,25 @@ except AttributeError:
         _on_editor_did_init_buttons(buttons, editor)
         return buttons
     addHook("setupEditorButtons", _legacy_setup_buttons)
+
+
+# Handle pycmd() calls from our JS keyboard shortcuts
+def _on_js_message(handled, message, context):
+    """Intercept pycmd messages from our keyboard shortcut JS."""
+    if not isinstance(context, Editor):
+        return handled
+    if message == "uf_lookup":
+        _do_lookup(context)
+        return True, None
+    if message == "uf_brackets":
+        _do_wrap_brackets(context)
+        return True, None
+    return handled
+
+try:
+    gui_hooks.webview_did_receive_js_message.append(_on_js_message)
+except AttributeError:
+    pass
 
 
 # ---------------------------------------------------------------------------
