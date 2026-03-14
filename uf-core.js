@@ -193,7 +193,7 @@ function convertFurigana(rootNode, opts) {
                     return NodeFilter.FILTER_REJECT;
                 if (p.classList && p.classList.contains('uf-pitch-word'))
                     return NodeFilter.FILTER_REJECT;
-                if (node.nodeValue && node.nodeValue.indexOf('{') !== -1)
+                if (node.nodeValue && (node.nodeValue.indexOf('{') !== -1 || node.nodeValue.indexOf('[') !== -1))
                     return NodeFilter.FILTER_ACCEPT;
                 return NodeFilter.FILTER_REJECT;
             }
@@ -208,7 +208,7 @@ function convertFurigana(rootNode, opts) {
         var textNode = textNodes[i];
         var text = textNode.nodeValue;
 
-        var RE = /([^\s{]+?)\{([^}]+)\}/g;
+        var RE = /([^\s{\[]+?)(?:\{([^}]+)\}|\[([^\]]+)\])/g;
         if (!RE.test(text)) continue;
         RE.lastIndex = 0;
 
@@ -220,7 +220,7 @@ function convertFurigana(rootNode, opts) {
             if (m.index > lastIdx) {
                 parts.push({ t: 'txt', v: text.substring(lastIdx, m.index) });
             }
-            parts.push({ t: 'fg', base: m[1], ann: m[2] });
+            parts.push({ t: 'fg', base: m[1], ann: m[2] || m[3] });
             lastIdx = m.index + m[0].length;
         }
 

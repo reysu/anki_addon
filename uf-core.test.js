@@ -541,3 +541,71 @@ describe('annotation regex edge cases', () => {
         expect(container.querySelectorAll('ruby')).toHaveLength(2);
     });
 });
+
+// ============================================================
+// Square bracket (Migaku) support
+// ============================================================
+describe('square bracket [] annotations (Migaku compat)', () => {
+    let container;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+    });
+
+    afterEach(() => {
+        container.remove();
+    });
+
+    test('simple reading with []', () => {
+        container.textContent = '食べる[たべる]';
+        convertFurigana(container);
+        const ruby = container.querySelector('ruby');
+        expect(ruby).not.toBeNull();
+        expect(ruby.textContent).toContain('食べる');
+        expect(ruby.textContent).toContain('たべる');
+    });
+
+    test('[] with pitch and gloss', () => {
+        container.textContent = '食べる[たべる;h;to eat]';
+        convertFurigana(container);
+        const ruby = container.querySelector('ruby');
+        expect(ruby).not.toBeNull();
+        expect(ruby.querySelector('.uf-pitch-word')).not.toBeNull();
+        expect(container.querySelector('.uf-has-info')).not.toBeNull();
+    });
+
+    test('mixed [] and {} in same text', () => {
+        container.textContent = '食べる[たべる] 飲む{のむ}';
+        convertFurigana(container);
+        expect(container.querySelectorAll('ruby')).toHaveLength(2);
+    });
+
+    test('[] preserves surrounding text', () => {
+        container.textContent = 'before 食べる[たべる] after';
+        convertFurigana(container);
+        expect(container.textContent).toContain('before');
+        expect(container.textContent).toContain('after');
+        expect(container.querySelector('ruby')).not.toBeNull();
+    });
+
+    test('empty [] is ignored', () => {
+        container.textContent = '食べる[]';
+        convertFurigana(container);
+        expect(container.querySelector('ruby')).toBeNull();
+    });
+
+    test('hidden prefix works with []', () => {
+        container.textContent = '食べる[!たべる]';
+        convertFurigana(container);
+        const ruby = container.querySelector('ruby');
+        expect(ruby).not.toBeNull();
+        expect(ruby.classList.contains('uf-hidden')).toBe(true);
+    });
+
+    test('multiple [] annotations', () => {
+        container.textContent = '食べる[たべる] 飲む[のむ] 走る[はしる]';
+        convertFurigana(container);
+        expect(container.querySelectorAll('ruby')).toHaveLength(3);
+    });
+});

@@ -266,7 +266,7 @@ _SCRIPT_TEMPLATE = r"""
                         return NodeFilter.FILTER_REJECT;
                     if (p.classList && p.classList.contains('uf-pitch-word'))
                         return NodeFilter.FILTER_REJECT;
-                    if (node.nodeValue && node.nodeValue.indexOf('{') !== -1)
+                    if (node.nodeValue && (node.nodeValue.indexOf('{') !== -1 || node.nodeValue.indexOf('[') !== -1))
                         return NodeFilter.FILTER_ACCEPT;
                     return NodeFilter.FILTER_REJECT;
                 }
@@ -281,7 +281,7 @@ _SCRIPT_TEMPLATE = r"""
             var textNode = textNodes[i];
             var text = textNode.nodeValue;
 
-            var RE = /([^\s{]+?)\{([^}]+)\}/g;
+            var RE = /([^\s{\[]+?)(?:\{([^}]+)\}|\[([^\]]+)\])/g;
             if (!RE.test(text)) continue;
             RE.lastIndex = 0;
 
@@ -293,7 +293,7 @@ _SCRIPT_TEMPLATE = r"""
                 if (m.index > lastIdx) {
                     parts.push({ t: 'txt', v: text.substring(lastIdx, m.index) });
                 }
-                parts.push({ t: 'fg', base: m[1], ann: m[2] });
+                parts.push({ t: 'fg', base: m[1], ann: m[2] || m[3] });
                 lastIdx = m.index + m[0].length;
             }
 
@@ -663,14 +663,16 @@ _SCRIPT_TEMPLATE = r"""
                         if (prev.contains(el)) dominated = true;
                     });
                     if (dominated) continue;
-                    if (el.textContent.indexOf('{') !== -1) {
+                    var tc = el.textContent;
+                    if (tc.indexOf('{') !== -1 || tc.indexOf('[') !== -1) {
                         convertFurigana(el);
                         processed.add(el);
                         done = true;
                     }
                 }
             }
-            if (!done && document.body && document.body.textContent.indexOf('{') !== -1) {
+            var btc = document.body ? document.body.textContent : '';
+            if (!done && btc && (btc.indexOf('{') !== -1 || btc.indexOf('[') !== -1)) {
                 convertFurigana(document.body);
             }
         } finally {
@@ -693,7 +695,7 @@ _SCRIPT_TEMPLATE = r"""
                 for (var n = 0; n < nodes.length; n++) {
                     var nd = nodes[n];
                     if (nd.nodeType === 1 && !_seen.has(nd) &&
-                        nd.textContent && nd.textContent.indexOf('{') !== -1) {
+                        nd.textContent && (nd.textContent.indexOf('{') !== -1 || nd.textContent.indexOf('[') !== -1)) {
                         _seen.add(nd);
                         convertFurigana(nd);
                     }
