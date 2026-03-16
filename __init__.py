@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10m)
+Universal Furigana Add-on for Anki (v10n)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -264,7 +264,8 @@ _SCRIPT_TEMPLATE = r"""
                         return NodeFilter.FILTER_REJECT;
                     if (p.classList && p.classList.contains('uf-pitch-word'))
                         return NodeFilter.FILTER_REJECT;
-                    if (node.nodeValue && node.nodeValue.indexOf('{') !== -1)
+                    var nv = node.nodeValue;
+                    if (nv && (nv.indexOf('{') !== -1 || nv.indexOf('[') !== -1))
                         return NodeFilter.FILTER_ACCEPT;
                     return NodeFilter.FILTER_REJECT;
                 }
@@ -278,6 +279,22 @@ _SCRIPT_TEMPLATE = r"""
         for (var i = textNodes.length - 1; i >= 0; i--) {
             var textNode = textNodes[i];
             var text = textNode.nodeValue;
+
+            // Convert Migaku [] brackets to {} so one regex handles both.
+            // Safe: we are inside a text node (TreeWalker skips SCRIPT/STYLE).
+            if (text.indexOf('[') !== -1) {
+                text = text.replace(/(\S+?)\[([^\]]*)\]/g, function(m, b, inside) {
+                    // Migaku comma-prefix: word[,dictform;pitch]
+                    // -> word{;pitch;dictform} (pitch on surface, dict in tooltip)
+                    if (inside.charAt(0) === ',') {
+                        var rest = inside.substring(1);
+                        var sc = rest.indexOf(';');
+                        if (sc !== -1) return b + '{;' + rest.substring(sc+1) + ';' + rest.substring(0, sc) + '}';
+                        return b + '{;;' + rest + '}';
+                    }
+                    return b + '{' + inside + '}';
+                });
+            }
 
             var RE = /([^\s{]+?)\{([^}]+)\}/g;
             if (!RE.test(text)) continue;
@@ -897,7 +914,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
     # Skip injection if template already has our markers
     if _MARKER_START in text:
         return text
-    if '{' in text and '}' in text:
+    if ('{' in text and '}' in text) or ('[' in text and ']' in text):
         return text + _build_script(cfg)
     return text
 
