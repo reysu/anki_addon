@@ -1,5 +1,5 @@
 """
-Universal Furigana Add-on for Anki (v10n)
+Universal Furigana Add-on for Anki (v10o)
 ========================================
 Converts {annotation} syntax into ruby text on ANY card, ANY field.
 Supports pitch accent visualization with colored lines above mora.
@@ -650,29 +650,36 @@ _SCRIPT_TEMPLATE = r"""
         }, true);
     }  // end _ufFirstLoad
 
-    function processCard() {
-        // ---- Cleanup from previous card ----
-        // Remove stale tooltip portal so tooltips from the old card
-        // don't leak into the new one.
+    // Shared cleanup: remove stale tooltip portal + reset state.
+    // Called on every card transition and initial load.
+    function cleanupTooltips() {
         var oldPortal = document.getElementById('uf-tooltip-portal');
         if (oldPortal) oldPortal.remove();
         _tt.pinned = null;
         _tt.hoverEl = null;
         if (_tt.hoverTimer) { clearTimeout(_tt.hoverTimer); _tt.hoverTimer = null; }
         _ufTooltipId = 0;
+    }
+
+    function hasAnnotations(text) {
+        return text.indexOf('{') !== -1 || text.indexOf('[') !== -1;
+    }
+
+    function processCard() {
+        cleanupTooltips();
 
         var sels = ['.card', '#content', '#qa', '#qa_box', '.field'];
         var done = false;
         for (var s = 0; s < sels.length; s++) {
             var els = document.querySelectorAll(sels[s]);
             for (var i = 0; i < els.length; i++) {
-                if (els[i].textContent.indexOf('{') !== -1) {
+                if (hasAnnotations(els[i].textContent)) {
                     convertFurigana(els[i]);
                     done = true;
                 }
             }
         }
-        if (!done && document.body && document.body.textContent.indexOf('{') !== -1) {
+        if (!done && document.body && hasAnnotations(document.body.textContent)) {
             convertFurigana(document.body);
         }
     }
@@ -685,13 +692,37 @@ _SCRIPT_TEMPLATE = r"""
 
     if (_ufFirstLoad && typeof MutationObserver !== 'undefined') {
         var _seen = new WeakSet();
+
+        // Card-transition detector: when the main card content is swapped
+        // (e.g. AnkiMobile reuses the webview), clean up stale tooltips
+        // and re-process. This fires even if the script itself is not
+        // re-executed, because it's a persistent observer on body.
         new MutationObserver(function(muts) {
+            var cardSwap = false;
+            for (var m = 0; m < muts.length; m++) {
+                // A large childList change on a card container signals a
+                // card transition (AnkiMobile/AnkiDroid swap content).
+                if (muts[m].type === 'childList' && muts[m].removedNodes.length > 0) {
+                    var tgt = muts[m].target;
+                    if (tgt === document.body || (tgt.classList &&
+                        (tgt.classList.contains('card') || tgt.id === 'content' ||
+                         tgt.id === 'qa' || tgt.id === 'qa_box'))) {
+                        cardSwap = true;
+                    }
+                }
+            }
+            if (cardSwap) {
+                cleanupTooltips();
+                processCard();
+                return;
+            }
+            // Normal mutation: process newly added nodes
             for (var m = 0; m < muts.length; m++) {
                 var nodes = muts[m].addedNodes;
                 for (var n = 0; n < nodes.length; n++) {
                     var nd = nodes[n];
                     if (nd.nodeType === 1 && !_seen.has(nd) &&
-                        nd.textContent && nd.textContent.indexOf('{') !== -1) {
+                        nd.textContent && hasAnnotations(nd.textContent)) {
                         _seen.add(nd);
                         convertFurigana(nd);
                     }
