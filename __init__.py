@@ -1274,8 +1274,51 @@ class _DictDB:
 
     # ---- Lookup methods ----
 
-    def lookup(self, word):
-        """Look up a word. User words first, then dicts by priority."""
+    def _term_reading(self, word, dicts):
+        """Reading of the top-scored entry for word in the term dicts."""
+        c = self.conn()
+        for d in dicts:
+            if d["type"] not in ("term", "both"):
+                continue
+            row = c.execute(
+                "SELECT reading FROM terms "
+                "WHERE expression=? AND dict_id=? AND reading != '' "
+                "ORDER BY score DESC LIMIT 1",
+                (word, d["id"])
+            ).fetchone()
+            if row:
+                return row[0]
+        return None
+
+    def _pitch_row(self, word, dict_id, reading):
+        """Pitch row for word, preferring the row for the given reading.
+
+        A kanji word can have several readings in a pitch dict (悪い is
+        listed as both わるい and にくい), so taking the first row can
+        attach the wrong reading and pitch.
+        """
+        c = self.conn()
+        if reading:
+            row = c.execute(
+                "SELECT reading, position FROM pitch_accents "
+                "WHERE expression=? AND dict_id=? AND reading=? LIMIT 1",
+                (word, dict_id, reading)
+            ).fetchone()
+            if row:
+                return row
+        return c.execute(
+            "SELECT reading, position FROM pitch_accents "
+            "WHERE expression=? AND dict_id=? LIMIT 1",
+            (word, dict_id)
+        ).fetchone()
+
+    def lookup(self, word, reading_hint=None):
+        """Look up a word. User words first, then dicts by priority.
+
+        reading_hint (e.g. MeCab's reading) picks the matching pitch entry
+        when the word has several readings; otherwise the term dicts'
+        top reading is used.
+        """
         # Check user words first (highest priority)
         uw = _user_word_lookup(word)
         if uw and (uw["reading"] or uw["pitch_code"] or uw["definition"]):
@@ -1284,16 +1327,13 @@ class _DictDB:
         c = self.conn()
         result = {"reading": None, "pitch_code": None, "definition": None}
         dicts = self.get_dictionaries()
+        want = reading_hint or self._term_reading(word, dicts)
 
         # Pitch
         for d in dicts:
             if d["type"] not in ("pitch", "both"):
                 continue
-            row = c.execute(
-                "SELECT reading, position FROM pitch_accents "
-                "WHERE expression=? AND dict_id=? LIMIT 1",
-                (word, d["id"])
-            ).fetchone()
+            row = self._pitch_row(word, d["id"], want)
             if row:
                 result["pitch_code"] = _position_to_uf_code(row[1], row[0])
                 if result["reading"] is None:
@@ -1324,7 +1364,7 @@ class _DictDB:
 
         return result
 
-    def lookup_all(self, word):
+    def lookup_all(self, word, reading_hint=None):
         """Look up a word and return ALL definitions from all dicts.
 
         Returns dict with same shape as lookup(), plus:
@@ -1352,14 +1392,12 @@ class _DictDB:
 
         # Pitch (first match wins — skip if user words already provided)
         if not result["pitch_code"]:
+            want = (result["reading"] or reading_hint
+                    or self._term_reading(word, dicts))
             for d in dicts:
                 if d["type"] not in ("pitch", "both"):
                     continue
-                row = c.execute(
-                    "SELECT reading, position FROM pitch_accents "
-                    "WHERE expression=? AND dict_id=? LIMIT 1",
-                    (word, d["id"])
-                ).fetchone()
+                row = self._pitch_row(word, d["id"], want)
                 if row:
                     result["pitch_code"] = _position_to_uf_code(row[1], row[0])
                     if result["reading"] is None:
@@ -2096,7 +2134,7 @@ def _handle_sentence_lookup(editor, sentence, field_idx):
             continue
 
         # Try surface form first
-        result = db.lookup_all(tok["surface"])
+        result = db.lookup_all(tok["surface"], reading_hint=tok["reading"])
 
         # If no match on surface, try the lemma (dictionary form)
         # but only if lemma is different from surface
